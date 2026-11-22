@@ -12,7 +12,7 @@ const (
 
 	accessTokenTTL  = time.Hour
 	refreshTokenTTL = 30 * 24 * time.Hour
-	authCodeTTL     = time.Minute
+	authCodeTTL     = 10 * time.Minute
 	pendingTTL      = 10 * time.Minute
 
 	defaultScope = "relay.read relay.write"

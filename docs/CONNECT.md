@@ -197,7 +197,7 @@ Claude 元数据 URL 的 Cloudflare 挑战。
 
 其他约束：
 
-- 授权码 60 s、一次性
+- 授权码 10 分钟、一次性
 - PKCE 必须是 `S256`
 - `resource` 必须等于 `https://relay.cyjin.dev/mcp`，并写入 token audience
 - access token 1 小时；refresh token 30 天，**每次刷新轮换**

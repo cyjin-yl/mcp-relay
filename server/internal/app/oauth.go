@@ -172,6 +172,11 @@ func (a *App) authorize(w http.ResponseWriter, r *http.Request) {
 <button type="submit" name="decision" value="deny" class="secondary">拒绝</button>
 </div>
 </form></div>`
+	// The consent form posts to /oauth/authorize/decision, whose 302 target is the
+	// registered client callback on another origin. A strict form-action 'self'
+	// can block that redirect in embedded browsers, leaving the consent page open
+	// and producing "authorization expired" on retry.
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; form-action 'self' https: http://localhost:* http://127.0.0.1:*; base-uri 'none'; frame-ancestors 'none'")
 	writeHTML(w, http.StatusOK, "授权连接", body)
 }
 
