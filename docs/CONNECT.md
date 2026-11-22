@@ -217,8 +217,12 @@ ChatGPT/Claude 在会话或连接建立时缓存 `tools/list`；新设备之后�
    ```
    `device` 可以填 `devices_list` 返回的 `id`（`dev_...`）或 `slug`；`tool` 是
    `device_tools_list` 返回的原始工具名。
-2. 如果这两个工具也不在列表里，说明连接是在它们部署前建立的：新开一个对话，
-   或在 Apps/Plugins 详情页刷新/重新添加 connector。之后新设备无需再刷新工具列表。
+2. 如果这两个工具也不在列表里，说明连接是在它们部署前建立的。ChatGPT：
+   左侧 **Plugins** → 点开 `mcp-relay` → **Try in chat** 旁边的 `…` → **Manage**
+   → **Information** 右侧的 **Refresh** → **新建对话**。新拉取的 action 可能默认关闭，
+   在同一个 Manage 面板的 Actions 里打开。Claude：**Customize** → 打开连接的
+   service → `…` → **Refresh tools list** → 新建对话。仍不出现时删除 connector 再添加。
+   之后新设备无需再刷新工具列表。
 3. `device_call` 没有 `readOnlyHint`，ChatGPT 会对调用要求确认；只读工具仍要求
    `relay.read`，写工具要求 `relay.write`。
 
