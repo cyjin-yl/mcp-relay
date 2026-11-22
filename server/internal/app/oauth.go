@@ -61,7 +61,7 @@ func (a *App) authorizationServerMetadata(w http.ResponseWriter, _ *http.Request
 		"response_types_supported":                       []string{"code"},
 		"grant_types_supported":                          []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":               []string{"S256"},
-		"token_endpoint_auth_methods_supported":          []string{"none", "client_secret_post"},
+		"token_endpoint_auth_methods_supported":          []string{"none", "client_secret_post", "client_secret_basic"},
 		"revocation_endpoint_auth_methods_supported":     []string{"none"},
 		"scopes_supported":                               supportedScopes,
 		"client_id_metadata_document_supported":          false,
@@ -284,13 +284,13 @@ func (a *App) registerClient(w http.ResponseWriter, r *http.Request) {
 	if method == "" {
 		method = "none"
 	}
-	if method != "none" && method != "client_secret_post" {
+	if method != "none" && method != "client_secret_post" && method != "client_secret_basic" {
 		writeJSON(w, 400, map[string]any{"error": "invalid_client_metadata", "error_description": "unsupported token_endpoint_auth_method"})
 		return
 	}
 	clientSecret := ""
 	secretHash := ""
-	if method == "client_secret_post" {
+	if method == "client_secret_post" || method == "client_secret_basic" {
 		clientSecret = randomToken("mrcs_")
 		secretHash = hashToken(clientSecret)
 	}
@@ -344,7 +344,13 @@ func (a *App) token(w http.ResponseWriter, r *http.Request) {
 		tokenError(w, 400, "unsupported_grant_type", "unsupported grant_type")
 		return
 	}
-	client, err := a.resolveClient(r.PostFormValue("client_id"))
+	clientID := r.PostFormValue("client_id")
+	if clientID == "" {
+		if basicID, _, ok := r.BasicAuth(); ok {
+			clientID = basicID
+		}
+	}
+	client, err := a.resolveClient(clientID)
 	if err != nil {
 		tokenError(w, 500, "server_error", "client metadata fetch failed")
 		return
@@ -655,6 +661,12 @@ func (a *App) authenticateClient(r *http.Request, client *OAuthClient) bool {
 	case "client_secret_post":
 		secret := r.PostFormValue("client_secret")
 		if secret == "" || client.SecretHash == "" {
+			return false
+		}
+		return constantTimeEqual(hashToken(secret), client.SecretHash)
+	case "client_secret_basic":
+		basicID, secret, ok := r.BasicAuth()
+		if !ok || basicID != client.ID || secret == "" || client.SecretHash == "" {
 			return false
 		}
 		return constantTimeEqual(hashToken(secret), client.SecretHash)

@@ -420,3 +420,18 @@ func mustURL(raw string) *url.URL {
 	u, _ := url.Parse(raw)
 	return u
 }
+
+func TestClientSecretBasicAuthentication(t *testing.T) {
+	app := &App{}
+	req := httptest.NewRequest(http.MethodPost, "/oauth/token", nil)
+	req.SetBasicAuth("client-1", "secret-value")
+	client := &OAuthClient{ID: "client-1", AuthMethod: "client_secret_basic", SecretHash: hashToken("secret-value")}
+	if !app.authenticateClient(req, client) {
+		t.Fatal("valid basic client rejected")
+	}
+	bad := httptest.NewRequest(http.MethodPost, "/oauth/token", nil)
+	bad.SetBasicAuth("client-1", "wrong")
+	if app.authenticateClient(bad, client) {
+		t.Fatal("invalid basic secret accepted")
+	}
+}

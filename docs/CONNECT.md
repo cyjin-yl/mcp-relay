@@ -183,14 +183,15 @@ GET https://relay.cyjin.dev/.well-known/oauth-authorization-server/mcp
 - `response_types_supported`: `["code"]`
 - `grant_types_supported`: `["authorization_code", "refresh_token"]`
 - `code_challenge_methods_supported`: `["S256"]`
-- `token_endpoint_auth_methods_supported`: `["none", "client_secret_post"]`
+- `token_endpoint_auth_methods_supported`: `["none", "client_secret_post", "client_secret_basic"]`
 - `scopes_supported`: `["relay.read", "relay.write", "offline_access"]`
   （受保护资源元数据只列 `relay.read` / `relay.write`）
 - `client_id_metadata_document_supported`: `false`
 - `authorization_response_iss_parameter_supported`: `true`
 
 客户端身份走 DCR：`POST /oauth/register`，接受
-`token_endpoint_auth_method=none`（public，PKCE）或 `client_secret_post`（返回一次性 secret）。
+`token_endpoint_auth_method=none`（public，PKCE）、`client_secret_post` 或
+`client_secret_basic`（后两者返回一次性 secret）。
 CIMD 代码仍保留为未 advertise 的兼容路径，但 ChatGPT/Claude 会直接使用 DCR，避免
 Claude 元数据 URL 的 Cloudflare 挑战。
 
