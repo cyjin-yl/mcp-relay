@@ -76,17 +76,19 @@ scope：`readOnlyHint=true` → `relay.read`；其余 → `relay.write`。`tools
 - [x] MCP endpoint、`devices_list`、scope 强制、审计
 - [x] WSS 设备注册、心跳、重连、工具路由、配对
 - [x] 设备 CLI：minimal + omp + rg/ast-grep、路径约束、patch 哈希
-- [x] npm `@cyjin/mcp-relay@0.1.0`（0.1.1 含硬化修复）
+- [x] npm `@cyjin/mcp-relay@0.1.2`（read-before-edit、bash_confirm、路径硬化）
 - [x] OVH + Caddy + Cloudflare 部署；生产 WSS/MCP 端到端验证
 - [x] life keyring 存入 GitHub OAuth 与 npm token；credential records 已提交
-- [x] Go/TS 测试：OAuth、refresh 重放、scope、跨用户、patch、glob 逃逸
+- [x] Go/TS 测试：OAuth、refresh 重放、scope、跨用户、patch、glob 逃逸、read-before-edit、bash_confirm
+- [x] 开放注册（`INVITE_REQUIRED=false`）
+- [x] Proto-UI compiler dogfood：`web/proto/relay-status.proto.ts` → `web/src/compiled/relay-status`（intro 徽章）
 
 ## 6. 待办
 
 - [ ] Proto-UI 0.3.0-alpha.1 **Web Components + shadcn Rhea** 控制台（`web/`，`/app/`）
 - [ ] 控制台内的 ChatGPT/Claude 接入说明（服务端 dashboard 已有简版）
 - [ ] 生产浏览器验证：配对码 → 设备在线 → ChatGPT/Claude 完成 OAuth
-- [ ] `@cyjin/mcp-relay@0.1.1` 注册表可见性确认
+- [x] `@cyjin/mcp-relay@0.1.2` 注册表可见性确认
 - [ ] kernel pack（持久 code mode，默认关闭）
 - [ ] 备份定时任务（SQLite `.backup`）与监控
 

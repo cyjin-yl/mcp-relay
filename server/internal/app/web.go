@@ -221,7 +221,7 @@ func (a *App) welcome(w http.ResponseWriter, r *http.Request) {
 <input type="hidden" name="_csrf" value="` + esc(sc.CSRFToken) + `">
 <input type="text" name="code" placeholder="ABCD-EFGH" autofocus>
 <button type="submit">激活</button></form>
-<p class="muted">mcp-relay 目前是邀请制。</p></div>`
+<p class="muted">开放注册已开启；若管理员临时关闭，则需要邀请码。</p></div>`
 	writeHTML(w, 200, "需要邀请码", body)
 }
 

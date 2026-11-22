@@ -100,90 +100,67 @@ function auditStatusBadge(status: string): HTMLElement {
   return el('span', { class: 'badge badge-muted' }, status || '未知')
 }
 
-function onboardingStep(index: number, ...content: (Node | string)[]): HTMLElement {
+function helpColumn(title: string, steps: (Node | string)[]): HTMLElement {
   return el(
-    'li',
-    { class: 'step' },
-    el('span', { class: 'step-number', 'aria-hidden': 'true' }, String(index)),
-    el('span', { class: 'step-text' }, ...content),
+    'div',
+    { class: 'help-col' },
+    el('h3', {}, title),
+    el('ol', { class: 'help-list' }, ...steps.map((step) => el('li', {}, step))),
   )
 }
 
-function onboardingCard(): HTMLElement {
-  const chatgptSteps = el(
-    'ol',
-    { class: 'steps' },
-    onboardingStep(1, 'ChatGPT → Plugins → Add custom MCP server'),
-    onboardingStep(2, 'Name 填写 ', el('code', { class: 'inline-code' }, 'mcp-relay')),
-    onboardingStep(
-      3,
-      'Server URL 填写 ',
-      el('code', { class: 'inline-code' }, 'https://relay.cyjin.dev/mcp'),
-    ),
-    onboardingStep(
-      4,
-      'Authentication 选择 ',
-      el('code', { class: 'inline-code' }, 'OAuth'),
-      '（自动发现，无需 API key）',
-    ),
-    onboardingStep(5, 'Create as plugin，然后安装它'),
-    onboardingStep(6, '在对话中 @-mention 这个插件'),
-  )
-
-  const claudeSteps = el(
-    'ol',
-    { class: 'steps' },
-    onboardingStep(1, 'Settings → Connectors → Add custom connector'),
-    onboardingStep(
-      2,
-      'URL 填写 ',
-      el('code', { class: 'inline-code' }, 'https://relay.cyjin.dev/mcp'),
-    ),
-    onboardingStep(
-      3,
-      'Authentication 选择 ',
-      el('code', { class: 'inline-code' }, 'OAuth'),
-      '（自动发现，无需 API key）',
-    ),
-  )
-
-  return el(
-    'section',
-    { class: 'card onboarding-card' },
+function connectionHelpDialog(): HTMLElement {
+  const dialog = el('proto-ui-shadcn-dialog-root', { class: 'dialog-inline' })
+  const trigger = el('proto-ui-shadcn-dialog-trigger')
+  trigger.append(protoButton('连接说明', { variant: 'outline', size: 'sm' }))
+  const close = protoButton('关闭', { variant: 'outline', size: 'sm' })
+  const content = el(
+    'proto-ui-shadcn-dialog-content',
+    { class: 'help-dialog' },
     el(
-      'div',
-      { class: 'card-head' },
-      el('h2', {}, '如何在 ChatGPT 添加 mcp-relay'),
-      el('p', { class: 'muted' }, '添加一次 MCP 连接器，之后在对话里 @ 引用即可。'),
-    ),
-    el(
-      'div',
-      { class: 'onboarding-grid' },
+      'proto-ui-shadcn-dialog-header',
+      {},
+      el('proto-ui-shadcn-dialog-title', {}, '连接 ChatGPT / Claude'),
       el(
-        'div',
-        { class: 'onboarding-col' },
-        el('h3', { class: 'onboarding-title' }, 'ChatGPT'),
-        chatgptSteps,
-      ),
-      el(
-        'div',
-        { class: 'onboarding-col' },
-        el('h3', { class: 'onboarding-title' }, 'Claude'),
-        claudeSteps,
+        'proto-ui-shadcn-dialog-description',
+        {},
+        '添加一次自定义 MCP 连接器，之后在对话里 @ 引用。',
       ),
     ),
     el(
-      'p',
-      { class: 'onboarding-note muted' },
-      'OAuth 同意页会授予 ',
-      el('code', { class: 'inline-code' }, 'relay.read'),
-      '（只读工具）和 ',
-      el('code', { class: 'inline-code' }, 'relay.write'),
-      '（文件写入 / shell）。配对设备后，工具会以 ',
-      el('code', { class: 'inline-code' }, 'd_<slug>__<tool>'),
-      ' 出现在对话中。',
+      'div',
+      { class: 'help-grid' },
+      helpColumn('ChatGPT', [
+        'Plugins → Add custom MCP server',
+        el('span', {}, 'URL ', el('code', { class: 'inline-code' }, 'https://relay.cyjin.dev/mcp')),
+        'Authentication 选择 OAuth',
+        'Create as plugin 并安装，然后在对话 @ 引用',
+      ]),
+      helpColumn('Claude', [
+        'Settings → Connectors → Add custom connector',
+        el('span', {}, 'URL ', el('code', { class: 'inline-code' }, 'https://relay.cyjin.dev/mcp')),
+        'Authentication 选择 OAuth',
+      ]),
+      helpColumn('新增设备', [
+        '先生成配对码并在设备上运行 connect',
+        '若当前对话没有设备工具，刷新 connector 或新开对话',
+        '也可用 device_tools_list / device_call 按 id 或 slug 调用',
+      ]),
+    ),
+    el(
+      'proto-ui-shadcn-dialog-footer',
+      { class: 'help-footer' },
+      el(
+        'span',
+        { class: 'muted' },
+        '同意页授予 relay.read（只读）和 relay.write（写文件 / shell）。',
+      ),
+      close,
     ),
   )
+  onProtoClick(close, () => closeDialog(dialog))
+  dialog.append(trigger, el('proto-ui-shadcn-dialog-mask'), content)
+  return dialog
 }
 
 export function mountDashboard(host: HTMLElement, me: Me): void {
@@ -255,19 +232,6 @@ export function mountDashboard(host: HTMLElement, me: Me): void {
     })
   })
 
-  const pairingCard = el(
-    'section',
-    { class: 'card' },
-    el(
-      'div',
-      { class: 'card-head' },
-      el('h2', {}, '配对设备'),
-      el('p', { class: 'muted' }, '生成一次性配对码，在目标机器上运行 connect 命令。'),
-    ),
-    el('div', { class: 'card-actions' }, pairButton),
-    pairResult,
-  )
-
   const devicesBody = el(
     'tbody',
     {},
@@ -321,16 +285,18 @@ export function mountDashboard(host: HTMLElement, me: Me): void {
       el(
         'div',
         { class: 'card-head' },
-        el('h2', {}, '我的设备'),
+        el('h2', {}, '设备'),
         el('p', { class: 'muted' }, '在线设备会出现在 ChatGPT / Claude 的工具列表里。'),
       ),
       el(
         'div',
         { class: 'card-actions' },
+        pairButton,
         el('div', { class: 'filter' }, filterSwitch, el('span', {}, '显示已撤销')),
         refreshDevicesButton,
       ),
     ),
+    pairResult,
     el('div', { class: 'table-wrap' }, devicesTable),
   )
 
@@ -425,7 +391,7 @@ export function mountDashboard(host: HTMLElement, me: Me): void {
     'proto-ui-shadcn-tabs-content',
     { value: 'devices' },
     { class: 'tab-panel' },
-    el('div', { class: 'dashboard-grid' }, pairingCard, devicesCard),
+    devicesCard,
   )
   const auditPanel = proto(
     'proto-ui-shadcn-tabs-content',
@@ -443,7 +409,7 @@ export function mountDashboard(host: HTMLElement, me: Me): void {
   const topbar = el(
     'header',
     { class: 'topbar' },
-    brand(),
+    brand('relay'),
     el(
       'div',
       { class: 'user' },
@@ -457,7 +423,23 @@ export function mountDashboard(host: HTMLElement, me: Me): void {
       'div',
       { class: 'app-shell' },
       topbar,
-      el('main', { class: 'container' }, noticeArea, onboardingCard(), tabsRoot),
+      el(
+        'main',
+        { class: 'container' },
+        el(
+          'div',
+          { class: 'page-head' },
+          el(
+            'div',
+            {},
+            el('h1', {}, '控制台'),
+            el('p', { class: 'muted' }, '管理设备、配对码和工具调用审计。'),
+          ),
+          connectionHelpDialog(),
+        ),
+        noticeArea,
+        tabsRoot,
+      ),
     ),
   )
   document.title = '设备 · mcp-relay'
