@@ -590,7 +590,7 @@ pre {
   padding: 0.125rem 0.375rem;
 }
 
-:root[data-style-profile='rhea'] proto-ui-shadcn-switch-root {
+:root[data-style-profile='rhea'] :is(proto-ui-shadcn-switch, proto-ui-shadcn-switch-root) {
   width: 2rem;
   height: 1.25rem;
   padding-inline: 0;
