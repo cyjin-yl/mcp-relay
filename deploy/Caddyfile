@@ -1,0 +1,38 @@
+{
+	admin 127.0.0.1:2019
+	servers {
+		protocols h1 h2
+	}
+}
+
+relay.cyjin.dev {
+	tls /etc/caddy/certs/relay.cyjin.dev.crt /etc/caddy/certs/relay.cyjin.dev.key
+	encode gzip zstd
+
+	handle_path /static/* {
+		root * /srv/relay/static
+		file_server
+		header Cache-Control "public, max-age=31536000, immutable"
+	}
+
+	redir /app /app/ 308
+	handle_path /app/* {
+		root * /srv/relay/web
+		try_files {path} /index.html
+		file_server
+		header {
+			Cache-Control "no-cache"
+			Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+		}
+	}
+
+	reverse_proxy 127.0.0.1:8080 {
+		header_up CF-Connecting-IP {remote_host}
+	}
+}
+
+ovh.cyjin.dev {
+	tls /etc/caddy/certs/ovh.cyjin.dev.crt /etc/caddy/certs/ovh.cyjin.dev.key
+	root * /var/www/site
+	file_server
+}

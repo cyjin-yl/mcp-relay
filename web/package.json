@@ -1,0 +1,22 @@
+{
+  "name": "mcp-relay-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "oxlint": "^1.90.0",
+    "typescript": "~7.0.2",
+    "vite": "^8.3.6"
+  },
+  "dependencies": {
+    "@proto.ui/adapter-web-component": "0.3.0-alpha.1",
+    "@proto.ui/prototypes-shadcn": "0.3.0-alpha.1"
+  }
+}

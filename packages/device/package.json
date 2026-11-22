@@ -1,0 +1,36 @@
+{
+  "name": "@cyjin/mcp-relay",
+  "version": "0.1.1",
+  "type": "module",
+  "description": "Connect a local device to relay.cyjin.dev so ChatGPT and Claude can call explicit file, patch and shell tools",
+  "license": "MIT",
+  "homepage": "https://relay.cyjin.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cyjin-yl/mcp-relay.git",
+    "directory": "packages/device"
+  },
+  "main": "./dist/cli.cjs",
+  "bin": {
+    "mcp-relay": "./dist/cli.cjs"
+  },
+  "files": [
+    "dist/cli.cjs",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "build:publish": "tsc -b && rm -rf dist && esbuild src/cli.ts --bundle --platform=node --format=cjs --target=node22 --external:ws --outfile=dist/cli.cjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@mcp-relay/shared": "0.1.0",
+    "fast-glob": "^3.3.3",
+    "zod": "^4.1.0"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "rootDir": "./proto-ui",
+  "stylesDir": "./src/styles",
+  "styles": {
+    "enabled": true,
+    "preset": "shadcn"
+  },
+  "adapters": {
+    "wc": {
+      "package": "@proto.ui/adapter-web-component"
+    }
+  },
+  "components": {
+    "wc": [
+      "shadcn-button",
+      "shadcn-dialog",
+      "shadcn-switch",
+      "shadcn-tabs"
+    ]
+  }
+}
