@@ -8,7 +8,7 @@ MCP endpoint：`https://relay.cyjin.dev/mcp`
 
 前提：
 
-- 已有 `relay.cyjin.dev` 账号；邀请制开启时先在 `/welcome` 用邀请码激活
+- 用 GitHub 登录 `relay.cyjin.dev` 即可注册（开放注册；管理员可临时改回邀请制）
 - 想暴露工具的机器装有 Node.js **22.5+**
 
 ## 1. 在 ChatGPT 中添加

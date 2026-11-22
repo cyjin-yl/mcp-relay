@@ -4,6 +4,7 @@ export type PackContext = {
   root: string;
   allowShell: boolean;
   allowKernel: boolean;
+  fileState?: Map<string, string>;
   log: (message: string) => void;
 };
 

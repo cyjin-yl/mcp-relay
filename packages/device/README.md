@@ -31,11 +31,11 @@ The process stays connected, reconnects automatically, and responds to heartbeat
 
 ## Tool packs
 
-**minimal** (Pi-style): `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`.
+**minimal** (Pi-style): `read`, `write`, `edit`, `bash`, `bash_confirm`, `grep`, `find`, `ls`.
 Search uses `rg` when installed and falls back to a bounded JS scanner.
 
 **omp**: `omp_read` (`:50-80` selectors), `omp_hash`, `omp_apply_patch`
-(`*** Begin Patch` with optional `expected_hashes`), `omp_glob`, `omp_grep`,
+(`*** Begin Patch`; `expected_hashes` is required for updates/deletes), `omp_glob`, `omp_grep`,
 `omp_ast_grep` (requires the `ast-grep` binary), and `omp_ast_grep` uses
 structural patterns such as `console.log($A)`.
 
@@ -46,6 +46,9 @@ On the relay these appear as `d_<device-slug>__<tool>`, for example
 
 - Every path is resolved and confined to `--root`; symlink escapes are rejected.
 - `bash` runs with a filtered environment and a 120 s maximum timeout.
+- `write`/`edit` require the file to have been read in this device process and refuse to apply if it changed since that read.
+- `omp_apply_patch` requires `expected_hashes` for every update/delete; call `omp_hash` first.
+- Destructive bash commands (`rm -rf`, `dd`, `mkfs`, `shutdown`, `reboot`, recursive chmod/chown, etc.) are refused by `bash` and require a separate `bash_confirm` call with a one-time token. This is a speed bump, not a shell security boundary.
 - Write tools require the `relay.write` OAuth scope; ChatGPT asks for confirmation by default.
 - Device tokens are bearer secrets for the WebSocket only. They cannot call MCP.
 - The relay never sees your files; it sees tool names, a SHA-256 of arguments, status and duration in the audit log.

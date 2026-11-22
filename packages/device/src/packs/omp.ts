@@ -1,7 +1,8 @@
+import { readFileSync } from "node:fs";
 import { z } from "zod";
 import type { CallToolResult, JsonObject, ToolDescriptor } from "@mcp-relay/shared";
 import { fileMode, readTextLimited, sha256Buffer } from "../fsutil.js";
-import { applyPatch } from "../patch.js";
+import { applyPatch, parsePatch } from "../patch.js";
 import { displayPath, resolveInsideRoot } from "../paths.js";
 import { astGrep, grepFiles, listFiles } from "../search.js";
 import { jsonResult, textResult, type PackContext, type ToolPack } from "../pack.js";
@@ -96,6 +97,7 @@ export function createOmpPack(): ToolPack {
             const input = readSchema.parse(args);
             const file = resolveInsideRoot(ctx.root, input.path);
             const text = readTextLimited(file, MAX_READ_BYTES);
+            ctx.fileState?.set(file, sha256Buffer(readFileSync(file)));
             const rawLines = text.split("\n");
             const lines = text === "" ? [] : text.endsWith("\n") ? rawLines.slice(0, -1) : rawLines;
             const range = parseSelector(input.selector);
@@ -112,6 +114,7 @@ export function createOmpPack(): ToolPack {
             const file = resolveInsideRoot(ctx.root, input.path);
             const text = readTextLimited(file, MAX_READ_BYTES);
             const buffer = Buffer.from(text, "utf8");
+            ctx.fileState?.set(file, sha256Buffer(buffer));
             return jsonResult({
               path: displayPath(ctx.root, file),
               sha256: sha256Buffer(buffer),
@@ -121,7 +124,16 @@ export function createOmpPack(): ToolPack {
           }
           case "omp_apply_patch": {
             const input = patchSchema.parse(args);
+            const ops = parsePatch(input.patch);
+            if (ops.some((op) => op.kind !== "add") && !input.expected_hashes) {
+              throw new Error("expected_hashes is required for updates/deletes; call omp_hash first");
+            }
             const files = applyPatch(ctx.root, input.patch, input.expected_hashes);
+            for (const file of files) {
+              const absolute = resolveInsideRoot(ctx.root, file.path);
+              if (file.action === "delete") ctx.fileState?.delete(absolute);
+              else if (file.newSha256) ctx.fileState?.set(absolute, file.newSha256);
+            }
             return jsonResult({ files });
           }
           case "omp_glob": {

@@ -58,7 +58,7 @@ export function renderIntro(host: HTMLElement): void {
   const hero = el(
     'section',
     { class: 'intro-hero' },
-    el('span', { class: 'badge badge-online intro-kicker' }, 'ChatGPT / Claude · MCP'),
+    el('relay-status', { class: 'intro-compiler-badge' }),
     el('h1', {}, '让你的 AI 直接使用', el('br'), el('em', {}, '你自己的机器')),
     el(
       'p',
@@ -90,7 +90,7 @@ export function renderIntro(host: HTMLElement): void {
     el(
       'ol',
       { class: 'intro-step-list' },
-      stepCard('1', 'GitHub 登录并生成配对码', '在控制台点击生成一次性配对码；邀请制账号先激活。'),
+      stepCard('1', 'GitHub 登录并生成配对码', 'GitHub 登录后直接在控制台生成一次性配对码。'),
       stepCard('2', '在设备上运行 npx', 'npx -y @cyjin/mcp-relay@0.1.1 connect --code XXXX-XXXX --root ~/code'),
       stepCard('3', '在 ChatGPT / Claude 添加 MCP', 'Plugins → Add custom MCP server，URL 填 https://relay.cyjin.dev/mcp，认证选 OAuth；Claude 在 Connectors 里添加。'),
     ),
@@ -131,7 +131,7 @@ export function renderPending(host: HTMLElement, me: Me): void {
     brand(),
     el('h1', {}, '账号待激活'),
     el('p', { class: 'muted' }, `当前 GitHub 账号：${me.login}`),
-    el('p', {}, 'mcp-relay 目前是邀请制，请先输入邀请码激活账号。'),
+    el('p', {}, '开放注册已开启；若管理员临时关闭，则需要邀请码激活。'),
     el('a', { class: 'login-link', href: '/welcome' }, '输入邀请码激活'),
   )
   host.replaceChildren(el('div', { class: 'auth-shell' }, card))

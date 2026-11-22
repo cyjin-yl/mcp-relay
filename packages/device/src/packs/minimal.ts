@@ -1,10 +1,11 @@
-import { existsSync, lstatSync, readdirSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { z } from "zod";
 import type { CallToolResult, JsonObject, ToolDescriptor } from "@mcp-relay/shared";
 import { atomicWrite, fileMode, readTextLimited, sha256Buffer } from "../fsutil.js";
 import { displayPath, resolveInsideRoot } from "../paths.js";
 import { grepFiles, listFiles } from "../search.js";
-import { runShell } from "../shell.js";
+import { runShell, type ShellResult } from "../shell.js";
 import { textResult, type PackContext, type ToolPack } from "../pack.js";
 
 const MAX_READ_BYTES = 2 * 1024 * 1024;
@@ -54,6 +55,11 @@ const bashSchema = z.object({
   timeout_ms: z.number().int().min(1000).max(120000).optional()
 });
 
+const bashConfirmSchema = z.object({
+  token: z.string().min(1),
+  command: z.string().min(1)
+});
+
 const grepSchema = z.object({
   pattern: z.string().min(1),
   path: z.string().optional(),
@@ -74,13 +80,50 @@ const lsSchema = z.object({
 
 const tools: ToolDescriptor[] = [
   descriptor("read", "Read a text file, optionally a line range. Use this when you need file contents.", readSchema, true),
-  descriptor("write", "Create or overwrite a file with exact content. Creates parent directories.", writeSchema, false),
-  descriptor("edit", "Replace an exact substring in a file. Fails if old_string is missing or ambiguous unless replace_all is true.", editSchema, false),
-  descriptor("bash", "Run a bash command in the device root. Returns exit code, stdout and stderr.", bashSchema, false),
+  descriptor("write", "Create or overwrite a file with exact content. An existing file must be read first; it is refused if it changed since that read.", writeSchema, false),
+  descriptor("edit", "Replace an exact substring in a file. The file must be read first and unchanged since that read. Fails if old_string is missing or ambiguous unless replace_all is true.", editSchema, false),
+  descriptor("bash", "Run a bash command in the device root. Destructive commands return a one-time token and require bash_confirm.", bashSchema, false),
+  descriptor("bash_confirm", "Execute a destructive bash command after a second confirmation. Requires the token returned by bash and the exact same command.", bashConfirmSchema, false),
   descriptor("grep", "Search file contents with a JavaScript RegExp. Returns path:line:text.", grepSchema, true),
   descriptor("find", "Find files by glob pattern. Returns paths relative to the device root.", findSchema, true),
   descriptor("ls", "List a directory with type and size.", lsSchema, true)
 ];
+
+const DANGEROUS_COMMANDS: RegExp[] = [
+  /\brm\s+(-[A-Za-z]*[rRfF][A-Za-z]*\s+)+/,
+  /\bdd\b/,
+  /\bmkfs(\.|\s)/,
+  /\bfdisk\b/,
+  /\bparted\b/,
+  /\bmkswap\b/,
+  /\bswapoff\b/,
+  /\bshutdown\b/,
+  /\breboot\b/,
+  /\bpoweroff\b/,
+  /\bhalt\b/,
+  /\binit\s+[06]\b/,
+  /\bchmod\s+-[A-Za-z]*R\b/,
+  /\bchown\s+-[A-Za-z]*R\b/,
+  /\bumount\b/,
+  /\bkill\s+-9\s+-1\b/,
+  /\bpkill\s+-9\b/,
+  />\s*\/dev\/(sd|block|mmcblk|nvme)/,
+  /\bgit\s+clean\s+-[A-Za-z]*[fd]/,
+  /\bgit\s+reset\s+--hard\b/
+];
+
+function isDangerousCommand(command: string): boolean {
+  return DANGEROUS_COMMANDS.some((pattern) => pattern.test(command));
+}
+
+function formatShellResult(result: ShellResult): CallToolResult {
+  const parts = [`exit_code: ${result.timedOut ? "timeout" : result.exitCode ?? result.signal ?? "unknown"}`];
+  if (result.stdoutTruncated) parts.push("stdout_truncated: true");
+  parts.push("stdout:", result.stdout);
+  if (result.stderrTruncated) parts.push("stderr_truncated: true");
+  parts.push("stderr:", result.stderr);
+  return textResult(parts.join("\n"), result.timedOut || (result.exitCode ?? 1) !== 0);
+}
 
 function countOccurrences(haystack: string, needle: string): number {
   let count = 0;
@@ -94,16 +137,20 @@ function countOccurrences(haystack: string, needle: string): number {
 }
 
 export function createMinimalPack(): ToolPack {
+  const localHashes = new Map<string, string>();
+  const pendingBash = new Map<string, { command: string; cwd?: string; timeoutMs: number; expires: number }>();
   return {
     id: "minimal",
     tools,
     async call(name: string, args: JsonObject, ctx: PackContext): Promise<CallToolResult> {
+      const hashes = ctx.fileState ?? localHashes;
       try {
         switch (name) {
           case "read": {
             const input = readSchema.parse(args);
             const file = resolveInsideRoot(ctx.root, input.path);
             const text = readTextLimited(file, MAX_READ_BYTES);
+            hashes.set(file, sha256Buffer(readFileSync(file)));
             const rawLines = text.split("\n");
             const lines = text === "" ? [] : text.endsWith("\n") ? rawLines.slice(0, -1) : rawLines;
             const offset = input.offset ?? 1;
@@ -117,15 +164,27 @@ export function createMinimalPack(): ToolPack {
           case "write": {
             const input = writeSchema.parse(args);
             const file = resolveInsideRoot(ctx.root, input.path);
-            const mode = existsSync(file) ? fileMode(file) : 0o644;
+            const exists = existsSync(file);
+            if (exists) {
+              const current = sha256Buffer(readFileSync(file));
+              const seen = hashes.get(file);
+              if (!seen) throw new Error("read the file before overwriting it");
+              if (seen !== current) throw new Error("file changed since it was read; read it again");
+            }
+            const mode = exists ? fileMode(file) : 0o644;
             const buffer = Buffer.from(input.content, "utf8");
             atomicWrite(file, buffer, mode);
+            hashes.set(file, sha256Buffer(buffer));
             return textResult(`wrote ${buffer.length} bytes to ${displayPath(ctx.root, file)}`);
           }
           case "edit": {
             const input = editSchema.parse(args);
             const file = resolveInsideRoot(ctx.root, input.path);
             const text = readTextLimited(file, MAX_READ_BYTES);
+            const current = sha256Buffer(readFileSync(file));
+            const seen = hashes.get(file);
+            if (!seen) throw new Error("read the file before editing it");
+            if (seen !== current) throw new Error("file changed since it was read; read it again");
             const count = countOccurrences(text, input.old_string);
             if (count === 0) throw new Error("old_string was not found");
             if (count > 1 && !input.replace_all) {
@@ -136,19 +195,39 @@ export function createMinimalPack(): ToolPack {
               : text.slice(0, text.indexOf(input.old_string)) +
                 input.new_string +
                 text.slice(text.indexOf(input.old_string) + input.old_string.length);
-            atomicWrite(file, Buffer.from(next, "utf8"), fileMode(file));
+            const nextBuffer = Buffer.from(next, "utf8");
+            atomicWrite(file, nextBuffer, fileMode(file));
+            hashes.set(file, sha256Buffer(nextBuffer));
             return textResult(`replaced ${input.replace_all ? count : 1} occurrence(s) in ${displayPath(ctx.root, file)}`);
           }
           case "bash": {
             if (!ctx.allowShell) throw new Error("shell tool is disabled on this device; start with --allow-shell");
             const input = bashSchema.parse(args);
-            const result = await runShell(ctx.root, input.command, input.cwd, input.timeout_ms ?? 30000);
-            const parts = [`exit_code: ${result.timedOut ? "timeout" : result.exitCode ?? result.signal ?? "unknown"}`];
-            if (result.stdoutTruncated) parts.push("stdout_truncated: true");
-            parts.push("stdout:", result.stdout);
-            if (result.stderrTruncated) parts.push("stderr_truncated: true");
-            parts.push("stderr:", result.stderr);
-            return textResult(parts.join("\n"), result.timedOut || (result.exitCode ?? 1) !== 0);
+            if (isDangerousCommand(input.command)) {
+              const token = randomBytes(16).toString("base64url");
+              const now = Date.now();
+              for (const [key, pending] of pendingBash) if (pending.expires <= now) pendingBash.delete(key);
+              pendingBash.set(token, {
+                command: input.command,
+                ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
+                timeoutMs: input.timeout_ms ?? 30000,
+                expires: now + 120000
+              });
+              return textResult(`Dangerous command requires a separate confirmation. Call bash_confirm with token ${token} and the exact same command. The user will be asked to confirm again.`, true);
+            }
+            return formatShellResult(await runShell(ctx.root, input.command, input.cwd, input.timeout_ms ?? 30000));
+          }
+          case "bash_confirm": {
+            if (!ctx.allowShell) throw new Error("shell tool is disabled on this device; start with --allow-shell");
+            const input = bashConfirmSchema.parse(args);
+            const pending = pendingBash.get(input.token);
+            if (!pending || pending.expires <= Date.now()) {
+              pendingBash.delete(input.token);
+              throw new Error("confirmation token is missing or expired; run bash again");
+            }
+            if (pending.command !== input.command) throw new Error("command does not match the confirmation token");
+            pendingBash.delete(input.token);
+            return formatShellResult(await runShell(ctx.root, pending.command, pending.cwd, pending.timeoutMs));
           }
           case "grep": {
             const input = grepSchema.parse(args);

@@ -36,6 +36,7 @@ describe("minimal pack", () => {
     const root = makeRoot();
     writeFileSync(join(root, "a.txt"), "x x x\n");
     const pack = createMinimalPack();
+    await pack.call("read", { path: "a.txt" }, context(root));
     const failed = await pack.call("edit", { path: "a.txt", old_string: "x", new_string: "y" }, context(root));
     expect(failed.isError).toBe(true);
     const ok = await pack.call(
@@ -109,6 +110,21 @@ describe("omp pack", () => {
     const stale = await pack.call("omp_apply_patch", { patch, expected_hashes: { "a.txt": hash.sha256 } }, context(root));
     expect(stale.isError).toBe(true);
     expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("one\n2\n");
+  });
+
+  it("requires expected_hashes for an update patch", async () => {
+    const root = makeRoot();
+    writeFileSync(join(root, "a.txt"), "one\n");
+    const pack = createOmpPack();
+    const patch = `*** Begin Patch
+*** Update File: a.txt
+@@
+-one
++two
+*** End Patch`;
+    const result = await pack.call("omp_apply_patch", { patch }, context(root));
+    expect(result.isError).toBe(true);
+    expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("one\n");
   });
 
   it("uses an ast-grep binary when present", async () => {

@@ -1,6 +1,9 @@
 import '../proto-ui/components/index'
 import './styles/proto-ui-style.css'
 import './styles/app.css'
+import { register as registerRelayStatus } from './compiled/relay-status/component'
+
+registerRelayStatus('relay-status')
 
 import { fetchMe, setCsrfToken, UnauthorizedError } from './api'
 import { mountDashboard } from './dashboard'

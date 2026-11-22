@@ -29,10 +29,12 @@ function sleep(ms: number): Promise<void> {
 
 export async function runConnection(options: ConnectionOptions): Promise<number> {
   const executor = buildExecutor(options.packs);
+  const fileState = new Map<string, string>();
   const context: PackContext = {
     root: options.root,
     allowShell: options.allowShell,
     allowKernel: options.allowKernel,
+    fileState,
     log: options.log
   };
   const wsUrl = new URL("/device/ws", options.config.url);
