@@ -22,8 +22,8 @@ flowchart LR
 - 公开端点：`https://relay.cyjin.dev/mcp`（Streamable HTTP，JSON 响应，无 SSE）。
 - OAuth 2.1 AS 同域：`/.well-known/oauth-protected-resource`、
   `/.well-known/oauth-authorization-server`、`/oauth/{authorize,token,register,revoke}`。
-- CIMD（ChatGPT / Claude 元数据 URL）+ DCR（public 或 `client_secret_post`）+
-  PKCE S256 + RFC 9207 `iss` + `resource` audience 绑定。
+- DCR（`none` 或 `client_secret_post`）+ PKCE S256 + RFC 9207 `iss` +
+  `resource` audience 绑定。CIMD 代码保留但不再 advertise，以避开 claude.ai 的抓取挑战。
 - 设备：网页一次性配对码 → `npx @cyjin/mcp-relay` 换长期设备 token → WSS 外连；
   文件与命令只在设备执行，relay 不接触文件内容。
 - 多租户：同一 URL；token/设备/审计按 `user_id` 隔离；邀请码开放注册。
@@ -46,8 +46,8 @@ scope：`readOnlyHint=true` → `relay.read`；其余 → `relay.write`。`tools
 
 - OAuth：code 60s 一次性；PKCE S256；refresh 轮换 + family 复用撤销；
   audience 必须是 `https://relay.cyjin.dev/mcp`；access token 不透明、1h。
-- CIMD：https、host allowlist（chatgpt.com / claude.ai / claude.com）、无重定向、
-  256 KiB、5s；`client_id` 必须等于文档 URL；redirect_uris 逐项校验。
+- DCR：客户端注册限速 20/h/IP；public `none` 或 `client_secret_post`；
+  redirect_uris 只允许 https 或 loopback http。CIMD 抓取仅保留为未 advertise 的兼容路径。
 - 设备：token 只用于 WSS，不能调 MCP；配对码 8 字符、哈希、一次性、10 分钟；
   设备按用户过滤，跨用户不可见/不可撤销。
 - 设备文件工具：路径 realpath 后必须仍在 `--root`；glob 拒绝 `..`/绝对模式；

@@ -49,7 +49,7 @@ claude mcp add --transport http relay https://relay.cyjin.dev/mcp
 页面上会显示：
 
 - 当前登录的 GitHub 账号
-- 发起请求的客户端名称（来自 CIMD 文档或 DCR 注册）
+- 发起请求的客户端名称（来自 DCR 注册）
 - 回调主机（client 的 `redirect_uri` 主机）
 - 申请的 scope
 
@@ -183,18 +183,16 @@ GET https://relay.cyjin.dev/.well-known/oauth-authorization-server/mcp
 - `response_types_supported`: `["code"]`
 - `grant_types_supported`: `["authorization_code", "refresh_token"]`
 - `code_challenge_methods_supported`: `["S256"]`
-- `token_endpoint_auth_methods_supported`: `["none"]`
+- `token_endpoint_auth_methods_supported`: `["none", "client_secret_post"]`
 - `scopes_supported`: `["relay.read", "relay.write", "offline_access"]`
   （受保护资源元数据只列 `relay.read` / `relay.write`）
-- `client_id_metadata_document_supported`: `true`
+- `client_id_metadata_document_supported`: `false`
 - `authorization_response_iss_parameter_supported`: `true`
 
-客户端身份有两条路：
-
-1. **CIMD**：`client_id` 是 HTTPS 文档 URL，relay 只抓取
-   `chatgpt.com`、`www.chatgpt.com`、`claude.ai`、`claude.com`、`www.claude.com`
-   下的地址；5 s 超时、256 KiB 上限、禁止重定向，且文档里的 `client_id` 必须等于该 URL
-2. **DCR**：`POST /oauth/register`，只接受 `token_endpoint_auth_method=none`
+客户端身份走 DCR：`POST /oauth/register`，接受
+`token_endpoint_auth_method=none`（public，PKCE）或 `client_secret_post`（返回一次性 secret）。
+CIMD 代码仍保留为未 advertise 的兼容路径，但 ChatGPT/Claude 会直接使用 DCR，避免
+Claude 元数据 URL 的 Cloudflare 挑战。
 
 其他约束：
 
@@ -233,9 +231,9 @@ curl -sS -o /dev/null -D - -X POST https://relay.cyjin.dev/mcp \
 - 证书错误：Cloudflare SSL 模式需 `Full (strict)`；源站证书必须覆盖 `relay.cyjin.dev`
 - `BASE_URL` 必须是 `https://relay.cyjin.dev`（不能带尾斜杠、不能是 http），否则 metadata
   里的 issuer/resource 与客户端期望不一致
-- CIMD 抓取失败会显示“客户端元数据获取失败”或“未知客户端”：检查源站出站访问
-  `chatgpt.com` / `claude.ai` 的能力，以及 client 的 metadata URL 是否在允许列表内
-- DCR 客户端不受 CIMD 影响；若 DCR 返回 429，等限流窗口过去再试
+- DCR 注册失败：检查 `redirect_uris` 是否全部为 https 或 loopback http；429 时等限流窗口
+- 客户端拿不到 `client_secret`：确认 DCR 响应里的 `token_endpoint_auth_method` 与 token
+  请求一致
 
 快速检查：
 

@@ -281,10 +281,13 @@ func (s *Store) DeleteSession(hash string) error {
 }
 
 func (s *Store) Client(id string) (*OAuthClient, error) {
-	row := s.DB.QueryRow(`SELECT client_id, COALESCE(client_name, ''), redirect_uris, source FROM oauth_clients WHERE client_id = ?`, id)
+	row := s.DB.QueryRow(
+		`SELECT client_id, COALESCE(client_name, ''), redirect_uris, source,
+		        token_endpoint_auth_method, COALESCE(client_secret_hash, '')
+		   FROM oauth_clients WHERE client_id = ?`, id)
 	var c OAuthClient
 	var redirects string
-	if err := row.Scan(&c.ID, &c.Name, &redirects, &c.Source); err != nil {
+	if err := row.Scan(&c.ID, &c.Name, &redirects, &c.Source, &c.AuthMethod, &c.SecretHash); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -296,11 +299,16 @@ func (s *Store) Client(id string) (*OAuthClient, error) {
 
 func (s *Store) UpsertClient(c OAuthClient) error {
 	redirects := marshalJSON(c.RedirectURIs)
+	method := c.AuthMethod
+	if method == "" {
+		method = "none"
+	}
 	_, err := s.DB.Exec(
 		`INSERT INTO oauth_clients (client_id, client_name, redirect_uris, token_endpoint_auth_method, client_secret_hash, source, created_at)
-		 VALUES (?, ?, ?, 'none', NULL, ?, ?)
-		 ON CONFLICT(client_id) DO UPDATE SET client_name = excluded.client_name, redirect_uris = excluded.redirect_uris`,
-		c.ID, nullString(c.Name), redirects, c.Source, nowUnix())
+		 VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?)
+		 ON CONFLICT(client_id) DO UPDATE SET client_name = excluded.client_name, redirect_uris = excluded.redirect_uris,
+		   token_endpoint_auth_method = excluded.token_endpoint_auth_method, client_secret_hash = excluded.client_secret_hash`,
+		c.ID, nullString(c.Name), redirects, method, c.SecretHash, c.Source, nowUnix())
 	return err
 }
 

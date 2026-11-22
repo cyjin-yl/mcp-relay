@@ -61,10 +61,10 @@ func (a *App) authorizationServerMetadata(w http.ResponseWriter, _ *http.Request
 		"response_types_supported":                       []string{"code"},
 		"grant_types_supported":                          []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":               []string{"S256"},
-		"token_endpoint_auth_methods_supported":          []string{"none"},
+		"token_endpoint_auth_methods_supported":          []string{"none", "client_secret_post"},
 		"revocation_endpoint_auth_methods_supported":     []string{"none"},
 		"scopes_supported":                               supportedScopes,
-		"client_id_metadata_document_supported":          true,
+		"client_id_metadata_document_supported":          false,
 		"authorization_response_iss_parameter_supported": true,
 	})
 }
@@ -280,15 +280,27 @@ func (a *App) registerClient(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.TokenEndpointAuthMethod != "" && req.TokenEndpointAuthMethod != "none" {
-		writeJSON(w, 400, map[string]any{"error": "invalid_client_metadata", "error_description": "only public clients are supported"})
+	method := req.TokenEndpointAuthMethod
+	if method == "" {
+		method = "none"
+	}
+	if method != "none" && method != "client_secret_post" {
+		writeJSON(w, 400, map[string]any{"error": "invalid_client_metadata", "error_description": "unsupported token_endpoint_auth_method"})
 		return
+	}
+	clientSecret := ""
+	secretHash := ""
+	if method == "client_secret_post" {
+		clientSecret = randomToken("mrcs_")
+		secretHash = hashToken(clientSecret)
 	}
 	client := OAuthClient{
 		ID:           "mrc_" + randomID(),
 		Name:         truncate(req.ClientName, 200),
 		RedirectURIs: req.RedirectURIs,
 		Source:       "dcr",
+		AuthMethod:   method,
+		SecretHash:   secretHash,
 	}
 	if err := a.store.UpsertClient(client); err != nil {
 		writeJSON(w, 500, map[string]any{"error": "server_error"})
@@ -302,15 +314,20 @@ func (a *App) registerClient(w http.ResponseWriter, r *http.Request) {
 	if len(responseTypes) == 0 {
 		responseTypes = []string{"code"}
 	}
-	writeJSON(w, 201, map[string]any{
+	response := map[string]any{
 		"client_id":                  client.ID,
 		"client_id_issued_at":        nowUnix(),
 		"client_name":                client.Name,
 		"redirect_uris":              client.RedirectURIs,
-		"token_endpoint_auth_method": "none",
+		"token_endpoint_auth_method": method,
 		"grant_types":                grantTypes,
 		"response_types":             responseTypes,
-	})
+	}
+	if clientSecret != "" {
+		response["client_secret"] = clientSecret
+		response["client_secret_expires_at"] = 0
+	}
+	writeJSON(w, 201, response)
 }
 
 func (a *App) token(w http.ResponseWriter, r *http.Request) {
@@ -334,6 +351,10 @@ func (a *App) token(w http.ResponseWriter, r *http.Request) {
 	}
 	if client == nil {
 		tokenError(w, 401, "invalid_client", "unknown client")
+		return
+	}
+	if !a.authenticateClient(r, client) {
+		tokenError(w, 401, "invalid_client", "client authentication failed")
 		return
 	}
 	switch grantType {
@@ -610,6 +631,7 @@ func (a *App) fetchCIMD(clientID string) (*OAuthClient, error) {
 		Name:         truncate(doc.ClientName, 200),
 		RedirectURIs: redirects,
 		Source:       "cimd",
+		AuthMethod:   "none",
 	}
 	if err := a.store.UpsertClient(*c); err != nil {
 		return nil, err
@@ -624,6 +646,21 @@ func isAllowedCimdURL(raw string) bool {
 		return false
 	}
 	return cimdHosts[strings.ToLower(u.Hostname())]
+}
+
+func (a *App) authenticateClient(r *http.Request, client *OAuthClient) bool {
+	switch client.AuthMethod {
+	case "", "none":
+		return true
+	case "client_secret_post":
+		secret := r.PostFormValue("client_secret")
+		if secret == "" || client.SecretHash == "" {
+			return false
+		}
+		return constantTimeEqual(hashToken(secret), client.SecretHash)
+	default:
+		return false
+	}
 }
 
 func (a *App) verifyBearer(r *http.Request) (*VerifiedToken, bool) {

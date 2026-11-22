@@ -43,6 +43,8 @@ type OAuthClient struct {
 	Name         string
 	RedirectURIs []string
 	Source       string
+	AuthMethod   string
+	SecretHash   string
 }
 
 type Annotations struct {

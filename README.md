@@ -3,7 +3,7 @@
 ChatGPT and Claude MCP connector for devices you control.
 
 - Public endpoint: `https://relay.cyjin.dev/mcp` (Streamable HTTP, JSON responses)
-- Auth: self-hosted OAuth 2.1 AS (CIMD + DCR + PKCE S256 + resource audience binding)
+- Auth: self-hosted OAuth 2.1 AS (DCR with public/secret clients + PKCE S256 + resource audience binding)
 - Device agent: `npx -y @cyjin/mcp-relay connect --code ...` (outbound WSS, no inbound ports)
 - Server: Go + SQLite on OVH, Caddy for TLS/static, Cloudflare proxy
 - Tool packs: Pi-style minimal file/shell tools + OMP-style hash-anchored `apply_patch`, ripgrep/ast-grep search
