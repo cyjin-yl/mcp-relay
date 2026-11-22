@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
-const mcpInstructions = "mcp-relay exposes tools on the user's online devices. Call devices_list first. Tool names are d_<device-slug>__<tool>. Read-only tools need relay.read; writes need relay.write. Do not assume devices share a filesystem. Use omp_hash before omp_apply_patch."
+const mcpInstructions = "mcp-relay exposes tools on the user's online devices. Call devices_list first; it returns each device id and slug. If a device's d_<slug>__* tools are not in this conversation's tool list, call device_tools_list then device_call({device,tool,arguments}) using the id or slug. Read-only targets need relay.read; writes need relay.write. Do not assume devices share a filesystem. Use omp_hash before omp_apply_patch."
 
 var supportedProtocols = []string{"2025-11-25", "2025-06-18", "2025-03-26"}
 
@@ -124,7 +125,8 @@ func (a *App) mcpPost(w http.ResponseWriter, r *http.Request) {
 			a.sendInsufficientScope(w, scopeRead)
 			return
 		}
-		tools := append([]Tool{devicesListTool()}, a.registry.ToolsForUser(token.UserID)...)
+		tools := []Tool{devicesListTool(), deviceToolsListTool(), deviceCallTool()}
+		tools = append(tools, a.registry.ToolsForUser(token.UserID)...)
 		writeRPCResult(w, req.ID, map[string]any{"tools": tools})
 	case "tools/call":
 		if notification {
@@ -151,6 +153,18 @@ func (a *App) mcpToolCall(w http.ResponseWriter, req rpcRequest, token *Verified
 		args = json.RawMessage("{}")
 	}
 	start := time.Now()
+	if params.Name == "device_tools_list" {
+		if !hasScope(token.Scopes, scopeRead) {
+			a.sendInsufficientScope(w, scopeRead)
+			return
+		}
+		a.mcpDeviceToolsList(w, req, token, args)
+		return
+	}
+	if params.Name == "device_call" {
+		a.mcpDeviceCall(w, req, token, args)
+		return
+	}
 	if params.Name == "devices_list" {
 		if !hasScope(token.Scopes, scopeRead) {
 			a.sendInsufficientScope(w, scopeRead)
@@ -193,6 +207,7 @@ func (a *App) devicesListResult(userID string) CallToolResult {
 		`SELECT id, slug, name, COALESCE(platform, ''), COALESCE(arch, ''), packs, COALESCE(last_seen_at, 0)
 		   FROM devices WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC`, userID)
 	type view struct {
+		ID       string   `json:"id"`
 		Slug     string   `json:"slug"`
 		Name     string   `json:"name"`
 		Platform string   `json:"platform"`
@@ -211,6 +226,7 @@ func (a *App) devicesListResult(userID string) CallToolResult {
 				continue
 			}
 			out = append(out, view{
+				ID:       id,
 				Slug:     slug,
 				Name:     name,
 				Platform: platform,
@@ -238,6 +254,109 @@ func devicesListTool() Tool {
 		InputSchema: schema,
 		Annotations: &Annotations{ReadOnly: &readOnly},
 	}
+}
+
+func deviceToolsListTool() Tool {
+	schema := json.RawMessage(`{"type":"object","properties":{"device":{"type":"string","description":"Device id (dev_...) or slug from devices_list"}},"required":["device"],"additionalProperties":false}`)
+	readOnly := true
+	return Tool{
+		Name:        "device_tools_list",
+		Title:       "List a device's tools",
+		Description: "Return the raw tool names, descriptions and JSON Schemas for one online device. Use before device_call when the d_<slug>__* tools are not loaded in this conversation.",
+		InputSchema: schema,
+		Annotations: &Annotations{ReadOnly: &readOnly},
+	}
+}
+
+func deviceCallTool() Tool {
+	schema := json.RawMessage(`{"type":"object","properties":{"device":{"type":"string","description":"Device id (dev_...) or slug from devices_list"},"tool":{"type":"string","description":"Raw tool name from device_tools_list, e.g. bash or omp_apply_patch"},"arguments":{"type":"object","description":"Tool arguments as a JSON object"}},"required":["device","tool"],"additionalProperties":false}`)
+	return Tool{
+		Name:        "device_call",
+		Title:       "Call a device tool",
+		Description: "Call a tool on a specific online device by id or slug. Use this for a device that is missing from the conversation's d_<slug>__* tool list; call device_tools_list first if the raw tool name is unknown. Write targets require relay.write and user confirmation.",
+		InputSchema: schema,
+	}
+}
+
+func (a *App) mcpDeviceToolsList(w http.ResponseWriter, req rpcRequest, token *VerifiedToken, args json.RawMessage) {
+	var params struct {
+		Device string `json:"device"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil || params.Device == "" {
+		writeRPCResult(w, req.ID, textResult("device_tools_list requires {device}", true))
+		return
+	}
+	device, ok := a.registry.FindDevice(token.UserID, params.Device)
+	if !ok {
+		writeRPCResult(w, req.ID, textResult("device is not online or does not belong to this account; call devices_list", true))
+		return
+	}
+	writeRPCResult(w, req.ID, jsonResult(map[string]any{
+		"device": map[string]any{"id": device.ID, "slug": device.Slug, "name": device.Name},
+		"tools":  device.Tools,
+	}))
+}
+
+func (a *App) mcpDeviceCall(w http.ResponseWriter, req rpcRequest, token *VerifiedToken, args json.RawMessage) {
+	var params struct {
+		Device    string          `json:"device"`
+		Tool      string          `json:"tool"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil || params.Device == "" || params.Tool == "" {
+		writeRPCResult(w, req.ID, textResult("device_call requires {device, tool, arguments?}", true))
+		return
+	}
+	callArgs := params.Arguments
+	if len(callArgs) == 0 || string(callArgs) == "null" {
+		callArgs = json.RawMessage("{}")
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(callArgs, &obj); err != nil || obj == nil {
+		writeRPCResult(w, req.ID, textResult("device_call arguments must be a JSON object", true))
+		return
+	}
+	device, ok := a.registry.FindDevice(token.UserID, params.Device)
+	if !ok {
+		writeRPCResult(w, req.ID, textResult("device is not online or does not belong to this account; call devices_list", true))
+		return
+	}
+	var target Tool
+	found := false
+	for _, candidate := range device.Tools {
+		if candidate.Name == params.Tool {
+			target = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		names := make([]string, 0, len(device.Tools))
+		for _, candidate := range device.Tools {
+			names = append(names, candidate.Name)
+		}
+		writeRPCResult(w, req.ID, textResult("unknown tool "+params.Tool+" on "+device.Slug+"; call device_tools_list. Available: "+strings.Join(names, ", "), true))
+		return
+	}
+	needed := scopeRead
+	if !target.readOnly() {
+		needed = scopeWrite
+	}
+	if !hasScope(token.Scopes, needed) {
+		a.sendInsufficientScope(w, needed)
+		return
+	}
+	start := time.Now()
+	result, err := device.call(target.Name, callArgs, deviceCallTimeout)
+	status := "ok"
+	errCode := ""
+	if err != nil {
+		result = textResult(err.Error(), true)
+		status = "error"
+		errCode = "device_error"
+	}
+	a.store.Audit(token.UserID, token.ClientID, device.ID, "device_call:"+target.Name, hashToken(string(callArgs)), status, errCode, time.Since(start).Milliseconds())
+	writeRPCResult(w, req.ID, result)
 }
 
 func writeRPCResult(w http.ResponseWriter, id json.RawMessage, result any) {

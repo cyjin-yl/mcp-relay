@@ -328,6 +328,12 @@ func TestRegistryIsolation(t *testing.T) {
 	if _, _, ok := registry.FindTool("user_a", deviceToolName("alpha", "read")); !ok {
 		t.Fatal("user_a cannot see its own tool")
 	}
+	if _, ok := registry.FindDevice("user_b", "dev_a"); ok {
+		t.Fatal("user_b can resolve user_a device by id")
+	}
+	if d, ok := registry.FindDevice("user_a", "alpha"); !ok || d.ID != "dev_a" {
+		t.Fatal("user_a cannot resolve its own device by slug")
+	}
 }
 
 func TestCIMDAndRedirectValidation(t *testing.T) {

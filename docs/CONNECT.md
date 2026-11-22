@@ -203,6 +203,25 @@ Claude 元数据 URL 的 Cloudflare 挑战。
 - access token 1 小时；refresh token 30 天，**每次刷新轮换**
 - 授权成功跳转带 RFC 9207 的 `iss` 参数
 
+### 新设备已在线，但当前会话没有它的工具
+
+ChatGPT/Claude 在会话或连接建立时缓存 `tools/list`；新设备之后上线，不会自动把
+`d_<slug>__*` 工具注入已有会话。先调用 `devices_list` 确认设备 `online`，然后：
+
+1. 如果当前连接已有稳定的 `device_tools_list` / `device_call`，直接使用：
+   ```json
+   {"device":"localhost-0a22"}
+   ```
+   ```json
+   {"device":"localhost-0a22","tool":"bash","arguments":{"command":"id"}}
+   ```
+   `device` 可以填 `devices_list` 返回的 `id`（`dev_...`）或 `slug`；`tool` 是
+   `device_tools_list` 返回的原始工具名。
+2. 如果这两个工具也不在列表里，说明连接是在它们部署前建立的：新开一个对话，
+   或在 Apps/Plugins 详情页刷新/重新添加 connector。之后新设备无需再刷新工具列表。
+3. `device_call` 没有 `readOnlyHint`，ChatGPT 会对调用要求确认；只读工具仍要求
+   `relay.read`，写工具要求 `relay.write`。
+
 ## 7. 故障排查
 
 ### 反复 401

@@ -113,6 +113,15 @@ func (r *Registry) ToolsForUser(userID string) []Tool {
 	return out
 }
 
+func (r *Registry) FindDevice(userID, identifier string) (*LiveDevice, bool) {
+	for _, d := range r.ListForUser(userID) {
+		if d.ID == identifier || d.Slug == identifier {
+			return d, true
+		}
+	}
+	return nil, false
+}
+
 func (r *Registry) FindTool(userID, name string) (*LiveDevice, Tool, bool) {
 	for _, d := range r.ListForUser(userID) {
 		if tool, ok := d.ToolIndex[name]; ok {

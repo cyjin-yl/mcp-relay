@@ -76,6 +76,14 @@ type CallToolResult struct {
 	Meta              map[string]any `json:"_meta,omitempty"`
 }
 
+func jsonResult(value any) CallToolResult {
+	b, _ := json.MarshalIndent(value, "", "  ")
+	return CallToolResult{
+		Content:           []ContentBlock{{"type": "text", "text": string(b)}},
+		StructuredContent: value,
+	}
+}
+
 func textResult(text string, isError bool) CallToolResult {
 	r := CallToolResult{Content: []ContentBlock{{"type": "text", "text": text}}}
 	r.IsError = isError

@@ -30,7 +30,7 @@ flowchart LR
 
 ## 2. 工具面
 
-内置：`devices_list`（relay.read）。
+内置：`devices_list`、`device_tools_list`、`device_call`（显式设备 id/slug；前两者 relay.read，device_call 按目标工具的 scope）。
 
 设备（在线时出现，`d_<slug>__<tool>`）：
 
