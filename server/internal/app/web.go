@@ -26,21 +26,7 @@ func (a *App) registerWebRoutes(mux *http.ServeMux) {
 }
 
 func (a *App) landing(w http.ResponseWriter, r *http.Request) {
-	sc := a.session(r)
-	var b strings.Builder
-	b.WriteString(`<h1>mcp-relay</h1><p class="muted">ChatGPT 和 Claude 通过 MCP 调用你机器上的工具。</p>
-<div class="card"><h2>它是什么</h2>
-<p>在你自己的机器上长期运行一个 <code>npx</code> 设备进程。relay 只负责鉴权、列出在线设备和转发工具调用；文件和命令都在你的机器上执行。</p>
-<ul><li>Pi 风格的最小工具：read / write / edit / bash / grep / find / ls</li>
-<li>OMP 风格：hash 校验的 apply_patch、glob、grep、带行号的 read</li>
-<li>可选的持久 code kernel（默认关闭）</li></ul></div>`)
-	if sc != nil && sc.User.Status == "active" {
-		b.WriteString(`<p><a href="/app/">进入控制台</a></p>`)
-	} else {
-		b.WriteString(`<p><a href="/login"><button>使用 GitHub 登录</button></a></p>`)
-	}
-	b.WriteString(`<p class="muted">MCP endpoint：<code>` + esc(a.cfg.Resource) + `</code></p>`)
-	writeHTML(w, 200, "mcp-relay", b.String())
+	http.Redirect(w, r, "/app/", http.StatusFound)
 }
 
 func navHTML(sc *SessionCtx) string {

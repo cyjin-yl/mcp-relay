@@ -643,3 +643,205 @@ pre {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Proto-UI shadcn Rhea intro page. */
+.intro {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 0 1.25rem 3rem;
+}
+
+.intro-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.25rem 0;
+}
+
+.intro-login-link {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--pui-border);
+  border-radius: var(--app-control-radius);
+  color: var(--pui-foreground);
+  font-size: 0.8125rem;
+  text-decoration: none;
+}
+
+.intro-login-link:hover {
+  background: var(--pui-muted);
+}
+
+.intro-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  padding: clamp(3rem, 8vw, 6rem) 0 3rem;
+  text-align: center;
+}
+
+.intro-kicker {
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-size: 0.6875rem;
+}
+
+.intro-hero h1 {
+  max-width: 16ch;
+  margin: 0;
+  font-size: clamp(2.4rem, 6vw, 4.6rem);
+  line-height: 1.02;
+  letter-spacing: -0.045em;
+}
+
+.intro-hero h1 em {
+  color: var(--pui-muted-foreground);
+  font-style: normal;
+}
+
+.intro-lead {
+  max-width: 42rem;
+  margin: 0;
+  color: var(--pui-muted-foreground);
+  font-size: 1.0625rem;
+  line-height: 1.6;
+}
+
+.intro-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.intro-endpoint {
+  margin: 0;
+  color: var(--pui-muted-foreground);
+  font-size: 0.75rem;
+}
+
+.intro-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  margin: 2rem 0;
+}
+
+.intro-feature {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 1.25rem;
+  border: 1px solid var(--pui-border);
+  border-radius: var(--app-radius);
+  background: var(--pui-card);
+}
+
+.intro-feature h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.intro-feature p {
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
+.intro-number {
+  color: var(--pui-muted-foreground);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+}
+
+.intro-steps {
+  gap: 1rem;
+  margin: 2rem 0;
+}
+
+.intro-steps h2 {
+  margin: 0;
+  font-size: 1.5rem;
+  letter-spacing: -0.02em;
+}
+
+.intro-step-list {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.intro-step {
+  display: grid;
+  grid-template-columns: 2rem 1fr;
+  gap: 0.75rem;
+  padding: 1rem;
+  border: 1px solid var(--pui-border);
+  border-radius: 1rem;
+  background: color-mix(in oklab, var(--pui-muted) 30%, var(--pui-card));
+}
+
+.intro-step-num {
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--pui-primary);
+  color: var(--pui-primary-foreground);
+  font-size: 0.8125rem;
+}
+
+.intro-step h3 {
+  margin: 0 0 0.25rem;
+  font-size: 0.9375rem;
+}
+
+.intro-step p {
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
+.intro-note {
+  margin: 0;
+  font-size: 0.75rem;
+}
+
+.intro-packs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 2rem 0;
+}
+
+.intro-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 2rem 0 0;
+  border-top: 1px solid var(--pui-border);
+  font-size: 0.75rem;
+}
+
+.intro-footer a {
+  color: var(--pui-foreground);
+}
+
+@media (max-width: 50rem) {
+  .intro-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .intro-footer {
+    flex-direction: column;
+  }
+}
+
+.intro-step p,
+.intro-feature p,
+.intro-lead,
+.intro-note {
+  overflow-wrap: anywhere;
+}

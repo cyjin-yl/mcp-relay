@@ -4,7 +4,7 @@ import './styles/app.css'
 
 import { fetchMe, setCsrfToken, UnauthorizedError } from './api'
 import { mountDashboard } from './dashboard'
-import { renderFatal, renderLogin, renderPending } from './screens'
+import { renderFatal, renderIntro, renderPending } from './screens'
 
 const mountPoint = document.querySelector<HTMLElement>('#app')
 if (!mountPoint) throw new Error('missing #app mount point')
@@ -21,7 +21,7 @@ async function boot(): Promise<void> {
     }
   } catch (error) {
     if (error instanceof UnauthorizedError) {
-      renderLogin(app)
+      renderIntro(app)
       return
     }
     renderFatal(app, error)
