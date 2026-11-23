@@ -18,13 +18,16 @@ import (
 )
 
 const (
-	maxToolsPerDevice   = 100
-	maxInflightPerDev   = 8
-	deviceHeartbeat     = 25 * time.Second
-	deviceSilenceLimit  = 60 * time.Second
-	deviceCallTimeout   = 20 * time.Second
-	deviceResponseGrace = 2 * time.Second
-	maxToolSchemaBytes  = 64 * 1024
+	maxToolsPerDevice     = 100
+	maxInflightPerDev     = 8
+	deviceHeartbeat       = 25 * time.Second
+	deviceSilenceLimit    = 60 * time.Second
+	deviceCallTimeout     = 20 * time.Second
+	deviceResponseGrace   = 2 * time.Second
+	maxToolSchemaBytes    = 64 * 1024
+	maxDeviceHelloBytes   = 1024 * 1024
+	maxDeviceMessageBytes = 20 * 1024 * 1024
+	maxNativeImageBytes   = 12 * 1024 * 1024
 )
 
 var toolNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,39}$`)
@@ -142,21 +145,30 @@ func (d *LiveDevice) send(v any) error {
 
 // Shell's advertised timeout is its execution budget. A small device-side
 // cleanup margin lets runShell reap its process group before the RPC expires.
-// Other tools retain the existing 20s budget.
+// Explicit computer tools use the same bounded execution budget and cleanup
+// margin. Other tools retain the existing 20s budget.
 func toolExecutionTimeout(tool string, args json.RawMessage) time.Duration {
 	if tool == "bash_confirm" || tool == "powershell_confirm" {
 		// The approved timeout is stored only on the device with its one-use token.
 		return 121 * time.Second
 	}
-	if tool != "bash" && tool != "powershell" {
+	if tool != "bash" && tool != "powershell" && !isComputerTool(tool) {
 		return deviceCallTimeout
 	}
 	budget := 30 * time.Second
 	var input struct {
 		TimeoutMS *int64 `json:"timeout_ms"`
 	}
-	if json.Unmarshal(args, &input) == nil && input.TimeoutMS != nil && *input.TimeoutMS >= 1000 && *input.TimeoutMS <= 120000 {
+	minimumTimeoutMS := int64(1000)
+	if isComputerTool(tool) {
+		minimumTimeoutMS = 1
+	}
+	if json.Unmarshal(args, &input) == nil && input.TimeoutMS != nil && *input.TimeoutMS >= minimumTimeoutMS && *input.TimeoutMS <= 120000 {
 		budget = time.Duration(*input.TimeoutMS) * time.Millisecond
+	}
+	if isComputerTool(tool) {
+		// Windows taskkill and native pipe cleanup may take up to two seconds.
+		return budget + 3*time.Second
 	}
 	return budget + time.Second
 }
@@ -374,7 +386,7 @@ func (a *App) deviceWebSocket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	conn.SetReadLimit(1024 * 1024)
+	conn.SetReadLimit(maxDeviceHelloBytes)
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var hello helloMessage
 	if err := conn.ReadJSON(&hello); err != nil {
@@ -392,6 +404,9 @@ func (a *App) deviceWebSocket(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 		return
 	}
+	// Keep registration small; authenticated result frames may include a bounded
+	// native MCP image (base64 expands a 12 MiB image to 16 MiB).
+	conn.SetReadLimit(maxDeviceMessageBytes)
 	name := strings.TrimSpace(hello.Device.Name)
 	if name == "" {
 		name = device.Name
@@ -466,10 +481,14 @@ func (a *App) deviceWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			if msg.OK {
 				var result CallToolResult
-				if err := json.Unmarshal(msg.Result, &result); err == nil {
-					live.deliver(msg.ID, result)
-				} else {
+				if err := json.Unmarshal(msg.Result, &result); err != nil {
 					live.deliver(msg.ID, textResult("device returned an invalid result", true))
+				} else if err := validateNativeImages(result); err != nil {
+					live.deliver(msg.ID, textResult("device returned an invalid image result: "+err.Error(), true))
+				} else {
+					// Preserve native content blocks and structured metadata without
+					// wrapping images or duplicating their base64 data in text.
+					live.deliver(msg.ID, result)
 				}
 			} else {
 				message := "device tool failed"
@@ -528,6 +547,15 @@ func validateTools(tools []Tool) ([]Tool, error) {
 		}
 		if tool.Description == "" {
 			tool.Description = tool.Name
+		}
+		if isComputerWriteTool(tool.Name) {
+			annotations := Annotations{}
+			if tool.Annotations != nil {
+				annotations = *tool.Annotations
+			}
+			readOnly := false
+			annotations.ReadOnly = &readOnly
+			tool.Annotations = &annotations
 		}
 		out = append(out, tool)
 	}

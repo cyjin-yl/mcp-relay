@@ -16,6 +16,11 @@ export const DEFAULT_TOOL_CALL_TIMEOUT_MS = 20_000;
 export const DEVICE_HEARTBEAT_MS = 25_000;
 export const DEVICE_SILENCE_LIMIT_MS = 60_000;
 export const MAX_INFLIGHT_PER_DEVICE = 8;
+export const MAX_DEVICE_HELLO_BYTES = 1024 * 1024;
+export const MAX_DEVICE_MESSAGE_BYTES = 20 * 1024 * 1024;
+export const MAX_NATIVE_IMAGE_BYTES = 12 * 1024 * 1024;
+export const DEFAULT_COMPUTER_CALL_TIMEOUT_MS = 30_000;
+export const MAX_COMPUTER_CALL_TIMEOUT_MS = 120_000;
 
 export type JsonObject = { [key: string]: unknown };
 
@@ -36,6 +41,13 @@ export type ToolDescriptor = {
 };
 
 export type ContentBlock = JsonObject & { type: string };
+
+/** Native MCP image content; base64 belongs here, never in text/structured metadata. */
+export type ImageContentBlock = ContentBlock & {
+  type: "image";
+  data: string;
+  mimeType: string;
+};
 
 export type CallToolResult = {
   content: ContentBlock[];
@@ -106,6 +118,7 @@ export function deviceToolName(slug: string, tool: string): string {
   return `${raw.slice(0, 55)}_${hashText(raw).slice(0, 8)}`;
 }
 
-export function requiredScope(tool: Pick<ToolDescriptor, "annotations">): Scope {
+export function requiredScope(tool: Pick<ToolDescriptor, "annotations"> & Partial<Pick<ToolDescriptor, "name">>): Scope {
+  if (tool.name === "computer_action" || tool.name === "computer_handoff" || tool.name === "computer_setup") return SCOPE_WRITE;
   return tool.annotations?.readOnlyHint === true ? SCOPE_READ : SCOPE_WRITE;
 }

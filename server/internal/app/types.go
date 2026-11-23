@@ -64,6 +64,9 @@ type Tool struct {
 }
 
 func (t Tool) readOnly() bool {
+	if isComputerWriteTool(t.Name) {
+		return false
+	}
 	return t.Annotations != nil && t.Annotations.ReadOnly != nil && *t.Annotations.ReadOnly
 }
 

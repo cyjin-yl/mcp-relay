@@ -48,6 +48,17 @@ interface FailedRelease {
   retryAfter: number;
   reason: string;
 }
+interface WorkerReloadRequest {
+  id: string;
+  requestedAt: number;
+  /** Identity of the desired settings revision; never contains settings or credentials. */
+  requestKey?: string;
+}
+interface WorkerReloadState extends WorkerReloadRequest {
+  status: "pending" | "deferred" | "completed" | "failed";
+  updatedAt: number;
+  reason?: string;
+}
 interface UpdateState {
   schemaVersion: 1;
   phase: string;
@@ -60,6 +71,7 @@ interface UpdateState {
   checkedAt?: number;
   updatedAt: number;
   lastResult?: { status: string; version?: string; reason?: string };
+  reload?: WorkerReloadState;
 }
 export type SupervisorMessage =
   | { type: "relay:drain"; requestId: string }
@@ -174,6 +186,7 @@ function validRelease(release: Release): boolean {
 
 /** Public diagnostic view: never expose argv, config/token contents or filesystem paths. */
 export function readUpdateStatus(stateDir: string): Record<string, unknown> {
+  const requestedReload = readReloadRequest(stateDir);
   try {
     const state = JSON.parse(readFileSync(join(stateDir, "state.json"), "utf8")) as UpdateState;
     if (state.schemaVersion !== 1) throw new Error("unknown update state");
@@ -182,16 +195,47 @@ export function readUpdateStatus(stateDir: string): Record<string, unknown> {
       sha256: state.current?.sha256, previousVersion: state.previous?.version,
       pendingVersion: state.pending?.candidate.version ?? state.handoff?.candidate.version, checkedAt: state.checkedAt,
       updatedAt: state.updatedAt, lastResult: state.lastResult,
+      reload: requestedReload && state.reload?.id !== requestedReload.id ? { ...requestedReload, status: "pending" } : state.reload,
       failed: state.failed ? { version: state.failed.version, retryAfter: state.failed.retryAfter, reason: state.failed.reason } : undefined
     };
   } catch (error) {
-    return { initialized: false, phase: (error as NodeJS.ErrnoException).code === "ENOENT" ? "not-started" : "state-unreadable" };
+    return { initialized: false, phase: (error as NodeJS.ErrnoException).code === "ENOENT" ? "not-started" : "state-unreadable",
+      reload: requestedReload ? { ...requestedReload, status: "pending" } : undefined };
   }
 }
 
 /** A local, idempotent wake-up request. The supervisor observes it within one second. */
 export async function requestUpdateCheck(stateDir: string): Promise<void> {
   await atomicJson(join(stateDir, "check-request.json"), { id: randomUUID(), requestedAt: Date.now() });
+}
+
+/** Coalesce only an outstanding request for the same desired settings revision. */
+export async function requestWorkerReload(stateDir: string, requestKey?: string): Promise<void> {
+  if (requestKey !== undefined && !/^[a-zA-Z0-9_.:-]{1,128}$/.test(requestKey)) {
+    throw new Error("invalid worker reload request key");
+  }
+  const pending = readReloadRequest(stateDir);
+  if (pending && pending.requestKey === requestKey) {
+    try {
+      const state = JSON.parse(readFileSync(join(stateDir, "state.json"), "utf8")) as UpdateState;
+      if (state.reload?.id !== pending.id || !["completed", "failed"].includes(state.reload.status)) return;
+    } catch { return; }
+  }
+  await atomicJson(join(stateDir, "reload-request.json"), {
+    id: randomUUID(), requestedAt: Date.now(), ...(requestKey !== undefined ? { requestKey } : {})
+  });
+}
+
+function readReloadRequest(stateDir: string): WorkerReloadRequest | undefined {
+  try {
+    const value = JSON.parse(readFileSync(join(stateDir, "reload-request.json"), "utf8")) as Record<string, unknown>;
+    if (typeof value.id !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(value.id)
+      || typeof value.requestedAt !== "number" || !Number.isFinite(value.requestedAt)
+      || (value.requestKey !== undefined && (typeof value.requestKey !== "string"
+        || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(value.requestKey)))) return undefined;
+    return { id: value.id, requestedAt: value.requestedAt,
+      ...(typeof value.requestKey === "string" ? { requestKey: value.requestKey } : {}) };
+  } catch { return undefined; }
 }
 
 function checkRequest(stateDir: string): string {
@@ -508,6 +552,17 @@ export async function runSupervisor(input: SupervisorOptions, runtime: Superviso
   let state: UpdateState | undefined;
   let nextCheck = 0;
   let seenRequest = checkRequest(options.stateDir);
+  let seenReload = "";
+  let nextReloadCheck = 0;
+  const reloadAtStart = new WeakMap<Worker, WorkerReloadRequest>();
+  const startWorker = (release: Release, paused: boolean): Worker => {
+    // Capture before fork: a request already present is applied by this fresh
+    // worker's normal CLI/config load, including after a supervisor restart.
+    const requested = readReloadRequest(options.stateDir);
+    const next = launchWorker(release, options.args, paused);
+    if (requested) reloadAtStart.set(next, requested);
+    return next;
+  };
   let restartDelay = 1_000;
   const persist = async (phase: string) => {
     if (!state) return;
@@ -523,7 +578,7 @@ export async function runSupervisor(input: SupervisorOptions, runtime: Superviso
     await persist("running");
   };
 
-  const update = async () => {
+  const update = async (reload?: WorkerReloadRequest) => {
     if (!worker || !state || !worker.ready || worker.exited) return;
     const previousWorker = worker;
     const from = state.current;
@@ -531,6 +586,16 @@ export async function runSupervisor(input: SupervisorOptions, runtime: Superviso
     let activationAttempted = false;
     let manifest: UpdateManifest | undefined;
     let candidate: Release;
+    if (reload) {
+      state.reload = { ...reload, status: "pending", updatedAt: Date.now() };
+      if (!validRelease(from)) {
+        state.reload = { ...reload, status: "failed", updatedAt: Date.now(), reason: "current verified bundle failed integrity verification" };
+        state.lastResult = { status: "reload-failed", version: from.version, reason: state.reload.reason };
+        await persist("running");
+        return;
+      }
+      candidate = from;
+    } else {
     const stageAbort = new AbortController();
     const abortStage = () => stageAbort.abort();
     previousWorker.child.once("exit", abortStage);
@@ -564,6 +629,7 @@ export async function runSupervisor(input: SupervisorOptions, runtime: Superviso
       }
       return;
     } finally { previousWorker.child.removeListener("exit", abortStage); }
+    }
     if (shutdown.signal.aborted || previousWorker.exited) return;
 
     const requestId = randomUUID();
@@ -578,7 +644,8 @@ export async function runSupervisor(input: SupervisorOptions, runtime: Superviso
     if (!idle) {
       if (!previousWorker.exited) await waitFor(send(previousWorker, { type: "relay:resume", requestId }), 1_000);
       if (!shutdown.signal.aborted) {
-        state.lastResult = { status: "deferred", version: candidate.version, reason: deferredReason };
+        state.lastResult = { status: reload ? "reload-deferred" : "deferred", version: candidate.version, reason: deferredReason };
+        if (reload) state.reload = { ...reload, status: "deferred", updatedAt: Date.now(), reason: deferredReason };
         await persist("running");
         options.log("update postponed; existing relay tasks continue: " + deferredReason);
       }
@@ -586,11 +653,11 @@ export async function runSupervisor(input: SupervisorOptions, runtime: Superviso
     }
 
     try {
-      state.pending = { candidate, from, startedAt: Date.now() };
-      await persist("starting-candidate");
+      if (!reload) state.pending = { candidate, from, startedAt: Date.now() };
+      await persist(reload ? "reloading" : "starting-candidate");
       await stopWorker(previousWorker);
       if (shutdown.signal.aborted) return;
-      const next = launchWorker(candidate, options.args, true);
+      const next = startWorker(candidate, true);
       worker = next;
       const ready = await waitFor(next.readyPromise, readyMs, shutdown.signal);
       if (!ready) throw new Error("candidate did not confirm authenticated relay registration before its deadline");
@@ -598,7 +665,7 @@ export async function runSupervisor(input: SupervisorOptions, runtime: Superviso
       if (shutdown.signal.aborted) return;
       if (next.exited) throw new Error("candidate exited during the health observation window");
 
-      if (underLauncher) {
+      if (underLauncher && !reload) {
         state.previous = from;
         state.current = candidate;
         state.handoff = { candidate, from, startedAt: Date.now() };
@@ -612,24 +679,34 @@ export async function runSupervisor(input: SupervisorOptions, runtime: Superviso
         return;
       }
 
-      // Persist a verified version before opening its gate to user calls.
-      state.previous = from;
-      state.current = candidate;
-      delete state.pending;
-      delete state.failed;
-      state.lastResult = { status: "updated", version: candidate.version };
+      // A local reload preserves release history, including an earlier failure.
+      // Its bytes are the existing verified release, not a manifest candidate.
+      if (!reload) {
+        state.previous = from;
+        state.current = candidate;
+        delete state.pending;
+        delete state.failed;
+      }
+      state.lastResult = { status: reload ? "reload-activating" : "updated", version: candidate.version };
       await persist("running");
       next.activationRequestId = "activate-" + randomUUID();
       activationAttempted = true;
       const activated = await waitFor(send(next, { type: "relay:resume", requestId: next.activationRequestId }), 1_000, shutdown.signal);
       if (!activated) throw new Error("candidate activation channel failed");
       delete next.activationRequestId;
-      options.log("relay updated from " + from.version + " to " + candidate.version);
+      if (reload) {
+        state.reload = { ...reload, status: "completed", updatedAt: Date.now() };
+        state.lastResult = { status: "reloaded", version: candidate.version };
+        await persist("running");
+      }
+      options.log(reload ? "relay worker reloaded the verified release " + candidate.version
+        : "relay updated from " + from.version + " to " + candidate.version);
     } catch (error) {
       if (shutdown.signal.aborted) return;
       const reason = safeReason(error);
       if (activationAttempted && worker && worker !== previousWorker) {
-        state.lastResult = { status: "activation-pending", version: candidate.version, reason };
+        state.lastResult = { status: reload ? "reload-activation-pending" : "activation-pending", version: candidate.version, reason };
+        if (reload) state.reload = { ...reload, status: "pending", updatedAt: Date.now(), reason };
         await persist("running");
         options.log("verified candidate activation is unconfirmed; retaining it and retrying without interrupting accepted calls");
         return;
@@ -640,21 +717,25 @@ export async function runSupervisor(input: SupervisorOptions, runtime: Superviso
         worker = previousWorker;
       } else {
         if (!validRelease(from)) throw new Error("last verified relay bundle failed integrity verification");
-        worker = launchWorker(from, options.args, false);
+        worker = startWorker(from, false);
       }
       state.current = from;
       state.previous = oldPrevious;
       delete state.handoff;
       delete state.pending;
-      await failed(manifest!, reason);
-      options.log("candidate rejected; restored relay " + from.version + ": " + reason);
+      if (reload) {
+        state.reload = { ...reload, status: "failed", updatedAt: Date.now(), reason };
+        state.lastResult = { status: "reload-failed", version: from.version, reason };
+        await persist("running");
+      } else await failed(manifest!, reason);
+      options.log((reload ? "local reload failed; retained verified relay " : "candidate rejected; restored relay ") + from.version + ": " + reason);
     }
   };
 
   try {
     state = await initializeState(options, statePath);
     const handoff = state.handoff;
-    if (!shutdown.signal.aborted) worker = launchWorker(state.current, options.args, Boolean(handoff));
+    if (!shutdown.signal.aborted) worker = startWorker(state.current, Boolean(handoff));
     if (handoff && worker) {
       let activationAttempted = false;
       try {
@@ -729,7 +810,7 @@ export async function runSupervisor(input: SupervisorOptions, runtime: Superviso
         await delay(restartDelay, undefined, { signal: shutdown.signal }).catch(() => {});
         if (shutdown.signal.aborted) break;
         if (!validRelease(state.current)) throw new Error("verified relay bundle failed integrity verification");
-        worker = launchWorker(state.current, options.args, false);
+        worker = startWorker(state.current, false);
         restartDelay = Math.min(restartDelay * 2, 30_000);
         continue;
       }
@@ -749,8 +830,33 @@ export async function runSupervisor(input: SupervisorOptions, runtime: Superviso
           }
         }
         if (state.phase === "starting" || state.phase === "restarting") await persist("running");
+        const requestedReload = readReloadRequest(options.stateDir);
+        const loadedReload = reloadAtStart.get(worker);
+        let handledReload = false;
+        if (requestedReload && loadedReload?.id === requestedReload.id
+          && !(state.reload?.id === requestedReload.id && ["completed", "failed"].includes(state.reload.status))) {
+          state.reload = { ...requestedReload, status: "completed", updatedAt: Date.now() };
+          state.lastResult = { status: "reloaded", version: state.current.version };
+          await persist("running");
+          handledReload = true;
+        }
+        const consumedReload = requestedReload && state.reload?.id === requestedReload.id
+          && ["completed", "failed"].includes(state.reload.status);
+        if (requestedReload && !consumedReload
+          && (requestedReload.id !== seenReload || Date.now() >= nextReloadCheck)) {
+          seenReload = requestedReload.id;
+          nextReloadCheck = Date.now() + pollMs;
+          try { await update(requestedReload); }
+          catch (error) {
+            const reason = safeReason(error);
+            state.reload = { ...requestedReload, status: "failed", updatedAt: Date.now(), reason };
+            await persist("running");
+            options.log("local reload control failed; keeping the current worker: " + reason);
+          }
+          handledReload = true;
+        }
         const request = checkRequest(options.stateDir);
-        if (Date.now() >= nextCheck || request !== seenRequest) {
+        if (!handledReload && (Date.now() >= nextCheck || request !== seenRequest)) {
           seenRequest = request;
           nextCheck = Date.now() + Math.round(pollMs * (0.8 + Math.random() * 0.4));
           try { await update(); }

@@ -1,6 +1,6 @@
 import { hostname, platform as osPlatform, arch as osArch } from "node:os";
 import WebSocket from "ws";
-import type { CallToolResult, JsonObject } from "@mcp-relay/shared";
+import { MAX_DEVICE_MESSAGE_BYTES, type CallToolResult, type JsonObject } from "@mcp-relay/shared";
 import { buildExecutor } from "./executor.js";
 import type { DeviceConfig } from "./config.js";
 import type { PackContext, ToolPack } from "./pack.js";
@@ -163,7 +163,21 @@ export async function runConnection(options: ConnectionOptions): Promise<number>
 
       const send = (payload: unknown): Promise<void> => {
         if (ws.readyState !== WebSocket.OPEN) return Promise.resolve();
-        const data = JSON.stringify(payload);
+        let data = JSON.stringify(payload);
+        if (Buffer.byteLength(data, "utf8") > MAX_DEVICE_MESSAGE_BYTES) {
+          const envelope = payload as { type?: unknown; id?: unknown };
+          options.log("outbound message exceeds the 20 MiB WebSocket limit");
+          if (envelope.type === "result" && typeof envelope.id === "string") {
+            data = JSON.stringify({
+              type: "result", id: envelope.id, ok: false,
+              error: { code: "result_too_large", message: "device result exceeds the 20 MiB WebSocket limit" }
+            });
+          }
+          if (Buffer.byteLength(data, "utf8") > MAX_DEVICE_MESSAGE_BYTES) {
+            ws.close(1009, "outbound message too large");
+            return Promise.resolve();
+          }
+        }
         pendingSends++;
         return new Promise<void>((done) => {
           let completed = false;
@@ -237,7 +251,10 @@ export async function runConnection(options: ConnectionOptions): Promise<number>
         const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
           ? Math.min(requestedTimeout, 125000) : 0;
         const args = message.args && typeof message.args === "object" ? message.args : {};
-        void scheduler.schedule(message.id, readOnlyTools.has(message.tool), timeoutMs,
+        // Handoff is a control operation that must be able to cancel an active UI writer.
+        // Its descriptor and server authorization remain write-scoped.
+        const concurrentControl = message.tool === "computer_handoff";
+        void scheduler.schedule(message.id, readOnlyTools.has(message.tool) || concurrentControl, timeoutMs,
           (signal) => executor.call(message.tool, args, { ...context, signal }))
           .then(async (result) => {
             await send({ type: "result", id: message.id, ok: true, result });

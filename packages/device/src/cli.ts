@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
@@ -13,12 +13,14 @@ import { createRoot } from "./paths.js";
 import { createMinimalPack } from "./packs/minimal.js";
 import { createOmpPack } from "./packs/omp.js";
 import { createKernelPack } from "./packs/kernel.js";
-import { runLauncher, runSupervisor, readUpdateStatus, requestUpdateCheck, acquireUpdateLock } from "./updater.js";
+import { createComputerPack, selectComputerBackend } from "./packs/computer.js";
+import { computerSettingsPath, readComputerSettings, writeComputerSettings } from "./computer/settings.js";
+import { runLauncher, runSupervisor, readUpdateStatus, requestUpdateCheck, requestWorkerReload, acquireUpdateLock } from "./updater.js";
 import type { ToolPack } from "./pack.js";
 
-const VERSION = "0.1.7";
+const VERSION = "0.1.8";
 const DEFAULT_URL = "https://relay.cyjin.dev";
-const SUPPORTED_PACKS: Record<string, true> = { minimal: true, omp: true, kernel: true };
+const SUPPORTED_PACKS: Record<string, true> = { minimal: true, omp: true, kernel: true, computer: true };
 
 const HELP = `mcp-relay ${VERSION}
 
@@ -27,17 +29,21 @@ Usage:
   npx -y @cyjin/mcp-relay connect [options]
   npx -y @cyjin/mcp-relay update-status [--config <path>]
   npx -y @cyjin/mcp-relay update-check [--config <path>]
+  npx -y @cyjin/mcp-relay computer-enable|computer-disable [--config <path>]
+  npx -y @cyjin/mcp-relay computer-status|computer-setup [--config <path>]
+  npx -y @cyjin/mcp-relay computer-pause|computer-resume [--config <path>]
 
 Options:
   --code <code>       One-time pairing code from the relay dashboard
   --root <dir>        Confine all file tools to this directory (default: cwd)
-  --packs <list>      Comma-separated packs: minimal,omp,kernel (default: minimal,omp)
+  --packs <list>      Comma-separated packs: minimal,omp,kernel,computer (default: minimal,omp)
   --name <name>       Device name (default: hostname)
   --url <url>         Relay base URL (default: ${DEFAULT_URL})
   --config <path>     Device config (default: ~/.mcp-relay/device.json)
   --allow-shell      Enable platform shell tools (default: on)
   --no-shell         Disable shell tools
   --allow-kernel     Enable persistent code kernel (opt-in; VM is not a security boundary)
+  --allow-computer   Enable native screen/input tools (explicit opt-in; not confined to --root)
   --no-auto-update   Disable the online update supervisor
   --update-manifest <url>  Explicit trusted HTTPS release manifest
   --update-interval <sec>  Update check interval, 10..86400 (default: 300)
@@ -47,6 +53,8 @@ Options:
 
 Windows exposes powershell explicitly; bash requires an installed Git Bash.
 Automatic updates drain active work and reconnect briefly, with rollback on failure.
+computer-enable persists opt-in and requests a safely drained worker reload; computer-disable/pause stop active control.
+OS screen/input permission prompts must be approved locally; locked desktops remain unavailable.
 `;
 
 function log(message: string): void {
@@ -75,7 +83,7 @@ async function main(): Promise<number> {
       code: { type: "string" }, root: { type: "string" }, packs: { type: "string" },
       name: { type: "string" }, url: { type: "string" }, config: { type: "string" },
       "allow-shell": { type: "boolean" }, "no-shell": { type: "boolean" },
-      "allow-kernel": { type: "boolean" }, "no-auto-update": { type: "boolean" },
+      "allow-kernel": { type: "boolean" }, "allow-computer": { type: "boolean" }, "no-auto-update": { type: "boolean" },
       "update-manifest": { type: "string" }, "update-interval": { type: "string" },
       verbose: { type: "boolean" }, help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" }
@@ -86,6 +94,40 @@ async function main(): Promise<number> {
   if (values.version) { process.stdout.write(`${VERSION}\n`); return 0; }
   const command = parsed.positionals[0] ?? "connect";
   const configPath = resolve(values.config ?? defaultConfigPath());
+  if (command.startsWith("computer-")) {
+    const allowed = ["computer-enable", "computer-disable", "computer-pause", "computer-resume", "computer-status", "computer-setup"];
+    if (!allowed.includes(command)) throw new Error("unknown computer command " + command);
+    if (command === "computer-enable" || command === "computer-disable") {
+      const settings = writeComputerSettings(configPath, { enabled: command === "computer-enable" });
+      const reloadRequested = command === "computer-enable";
+      if (reloadRequested) {
+        await requestWorkerReload(updateDirectory(configPath), settings.revision);
+        await requestUpdateCheck(updateDirectory(configPath));
+      }
+      process.stdout.write(JSON.stringify({ ...settings, settingsPath: computerSettingsPath(configPath),
+        workerReloadRequested: reloadRequested,
+        activation: reloadRequested ? "managed supervisor reload after safe drain, or next managed start" : "disabled immediately" }) + "\n");
+      return 0;
+    }
+    if (command === "computer-pause" || command === "computer-resume") {
+      process.stdout.write(JSON.stringify(writeComputerSettings(configPath, { paused: command === "computer-pause" })) + "\n");
+      return 0;
+    }
+    const settings = readComputerSettings(configPath, values["allow-computer"]);
+    if (command === "computer-status") {
+      process.stdout.write(JSON.stringify({ ...settings, settingsPath: computerSettingsPath(configPath) }, null, 2) + "\n");
+      return 0;
+    }
+    if (!settings.enabled || settings.paused) throw new Error("Enable and resume computer control before setup.");
+    const backend = selectComputerBackend();
+    const release = await acquireUpdateLock(join((await import("node:os")).homedir(), ".mcp-relay", "computer-control"), "desktop");
+    try {
+      const context = { signal: AbortSignal.timeout(120000), timeoutMs: 120000 };
+      const result = backend.setup ? await backend.setup(context) : { state: await backend.inspect(context) };
+      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    } finally { await release(); }
+    return 0;
+  }
   if (command === "update-status") {
     process.stdout.write(`${JSON.stringify(readUpdateStatus(updateDirectory(configPath)), null, 2)}\n`);
     return 0;
@@ -113,6 +155,10 @@ async function main(): Promise<number> {
   for (const pack of packsInput) {
     if (!SUPPORTED_PACKS[pack]) throw new Error(`unsupported pack ${pack}; supported: ${Object.keys(SUPPORTED_PACKS).join(",")}`);
   }
+  const computerSettings = readComputerSettings(configPath, values["allow-computer"]);
+  const allowComputer = computerSettings.enabled;
+  if (packsInput.includes("computer") && !allowComputer && !existsSync(computerSettingsPath(configPath))) throw new Error("computer pack requires --allow-computer or computer-enable");
+  if (allowComputer && !packsInput.includes("computer")) packsInput.push("computer");
   const deviceName = values.name ?? hostname();
   const allowShell = values["no-shell"] !== true;
   const allowKernel = values["allow-kernel"] === true;
@@ -150,6 +196,7 @@ async function main(): Promise<number> {
     if (values["update-manifest"]) args.push("--update-manifest", values["update-manifest"]);
     if (!allowShell) args.push("--no-shell");
     if (allowKernel) args.push("--allow-kernel");
+    if (values["allow-computer"]) args.push("--allow-computer");
     if (values.verbose) args.push("--verbose");
     const start = supervisorProcess ? runSupervisor : runLauncher;
     return start({
@@ -164,6 +211,7 @@ async function main(): Promise<number> {
   if (packsInput.includes("minimal")) packs.push(createMinimalPack());
   if (packsInput.includes("omp")) packs.push(createOmpPack());
   if (packsInput.includes("kernel")) packs.push(createKernelPack());
+  if (packsInput.includes("computer")) packs.push(createComputerPack({ configPath, defaultEnabled: values["allow-computer"] }));
   const control: ConnectionControl | undefined = supervisedWorker ? {
     send: (message) => {
       if (!process.connected) return;

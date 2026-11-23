@@ -27,6 +27,7 @@ The process stays connected, reconnects automatically, and responds to heartbeat
 | `--url <url>` | Relay base URL (default: `https://relay.cyjin.dev`) |
 | `--config <path>` | Device config path (default: `~/.mcp-relay/device.json`) |
 | `--no-shell` | Disable all shell tools, including Bash and PowerShell |
+| `--allow-computer` | Enable native screenshot and input tools outside the file root (explicit opt-in) |
 | `--allow-kernel` | Enable the opt-in persistent `kernel` pack (VM, not a security boundary) |
 | `--no-auto-update` | Disable online automatic updates |
 | `--update-manifest <https-url>` | Select a trusted release manifest (default: the configured relay origin, `/updates/device/stable.json`) |
@@ -40,6 +41,8 @@ Search uses `rg` when installed and falls back to a bounded JS scanner.
 
 **kernel** (opt-in, `--packs kernel --allow-kernel`): `kernel_eval`, `kernel_reset` with a persistent JS context and root-confined `relay.readFile/writeFile/list` helpers.
 
+**computer** (opt-in): `computer_info`, `computer_screenshot`, `computer_action`, `computer_handoff`, `computer_setup`. Native PNG images, fresh-frame coordinates, bounded input, request deduplication, and persistent pause. Supports Windows, macOS, Linux X11, and Android with existing su; see [computer use](../../docs/computer-use.md) for requirements and activation.
+
 **omp**: `omp_read` (`:50-80` selectors), `omp_hash`, `omp_apply_patch`
 (`*** Begin Patch`; `expected_hashes` is required for updates/deletes), `omp_glob`, `omp_grep`,
 `omp_ast_grep` (requires the `ast-grep` binary), and `omp_ast_grep` uses
@@ -50,14 +53,14 @@ On the relay these appear as `d_<device-slug>__<tool>`, for example
 
 ## Safety
 
-- Every path is resolved and confined to `--root`; symlink escapes are rejected.
+- File-tool paths are resolved and confined to `--root`; symlink escapes are rejected. Computer tools operate on the explicitly enabled OS desktop.
 - Shell tools run with a filtered environment, a root-confined working directory and a 120 s maximum timeout. On POSIX, Bash discovery checks `MCP_RELAY_BASH`, `$PREFIX/bin/bash`, Termux's absolute bash, `/bin/bash`, `bash` on `PATH`, then `sh`. Windows uses explicit native PowerShell or Git Bash, preserves UTF-8 output and cancels the process tree on timeout.
 - `write`/`edit` require the file to have been read in this device process and refuse to apply if it changed since that read.
 - `omp_apply_patch` requires `expected_hashes` for every update/delete; call `omp_hash` first.
 - Destructive Bash commands (`rm -rf`, `dd`, `mkfs`, `shutdown`, `reboot`, recursive chmod/chown, etc.) require a separate `bash_confirm` call with a one-time token. PowerShell operations such as `Remove-Item`, `Clear-Content`, `Stop-Process` and formatting commands require `powershell_confirm`. Tokens are bound to the command and shell. This is a speed bump, not a shell security boundary.
 - Write tools require the `relay.write` OAuth scope; ChatGPT asks for confirmation by default.
 - Device tokens are bearer secrets for the WebSocket only. They cannot call MCP.
-- The relay never sees your files; it sees tool names, a SHA-256 of arguments, status and duration in the audit log.
+- The relay forwards tool result bodies, including file contents and screenshots, to the authenticated caller. Routine audit logs contain tool names, argument hashes, status and duration rather than those result bodies.
 
 ## Online updates
 

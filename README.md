@@ -6,7 +6,7 @@ ChatGPT and Claude MCP connector for devices you control.
 - Auth: self-hosted OAuth 2.1 AS (DCR with public/secret clients + PKCE S256 + resource audience binding)
 - Device agent: `npx -y @cyjin/mcp-relay connect --code ...` (outbound WSS, no inbound ports)
 - Server: Go + SQLite on OVH, Caddy for TLS/static, Cloudflare proxy
-- Tool packs: Pi-style minimal file/shell tools + OMP-style hash-anchored `apply_patch`, ripgrep/ast-grep search
+- Tool packs: minimal file/shell tools, OMP hash-anchored patches/search, an optional persistent kernel, and opt-in native computer use (Windows, macOS, Linux X11, rooted Android)
 
 ## Layout
 
@@ -41,3 +41,5 @@ resource metadata.
 
 See [docs/CONNECT.md](docs/CONNECT.md) for ChatGPT/Claude setup and
 [docs/RUNBOOK.md](docs/RUNBOOK.md) for operations.
+
+See [Native computer use](docs/computer-use.md) for screen/input capabilities, explicit enablement, platform requirements, handoff, and update behavior.
