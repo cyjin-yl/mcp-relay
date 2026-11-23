@@ -16,11 +16,11 @@ on:
         required: true
       harness_url:
         description: Prebuilt native acceptance harness URL
-        default: https://relay.cyjin.dev/updates/device/0.1.7/windows-bundle-smoke.cjs
+        default: https://relay.cyjin.dev/updates/device/0.1.7/windows-bundle-smoke-v2.cjs
         required: true
       harness_sha256:
         description: Expected harness SHA-256
-        default: df15aa1d35bd6d58102b63674e1e2509ba97d05d0e4cc5aa1fe719b2b64c3a0e
+        default: 38ae99ff485ef22baeb35f2c31a3482dbe64309b20a1fddc032d598f8a651a61
         required: true
 
 permissions:
@@ -33,8 +33,8 @@ jobs:
     env:
       RELAY_BUNDLE_URL: ${{ inputs.bundle_url || 'https://relay.cyjin.dev/updates/device/0.1.7/cli.cjs' }}
       RELAY_BUNDLE_SHA: ${{ inputs.bundle_sha256 || 'fc1bf1088fb79fa8de77c60c79df601a515728eb8d2670a4a542413193f22fda' }}
-      RELAY_HARNESS_URL: ${{ inputs.harness_url || 'https://relay.cyjin.dev/updates/device/0.1.7/windows-bundle-smoke.cjs' }}
-      RELAY_HARNESS_SHA: ${{ inputs.harness_sha256 || 'df15aa1d35bd6d58102b63674e1e2509ba97d05d0e4cc5aa1fe719b2b64c3a0e' }}
+      RELAY_HARNESS_URL: ${{ inputs.harness_url || 'https://relay.cyjin.dev/updates/device/0.1.7/windows-bundle-smoke-v2.cjs' }}
+      RELAY_HARNESS_SHA: ${{ inputs.harness_sha256 || '38ae99ff485ef22baeb35f2c31a3482dbe64309b20a1fddc032d598f8a651a61' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:

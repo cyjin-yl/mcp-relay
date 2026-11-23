@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { fork, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -161,7 +161,9 @@ async function main(): Promise<void> {
       assert.notEqual(result.isError, true, text(result));
       const object = JSON.parse(stdout(result));
       assert.equal(object.unicode, '中文🙂 "quoted"');
-      assert.equal(resolve(object.root).toLowerCase(), resolve(subdir).toLowerCase());
+      // PowerShell expands an 8.3 TEMP alias (RUNNER~1) to its long spelling.
+      // Compare the actual filesystem identity without relaxing the cwd boundary.
+      assert.equal(realpathSync.native(object.root).toLowerCase(), realpathSync.native(subdir).toLowerCase());
       assert.equal(object.marker, "1");
       assert(!object.secret);
     });
