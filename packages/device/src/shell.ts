@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
-import { win32 } from "node:path";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
+import { basename, isAbsolute, join, win32 } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { resolveInsideRoot } from "./paths.js";
 
@@ -29,7 +29,7 @@ export function shellEnvironment(
   source: NodeJS.ProcessEnv = process.env
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { MCP_RELAY: "1" };
-  const keys = ["PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR"];
+  const keys = ["PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR", "PREFIX"];
   if (platform === "android") {
     // Android's app_process/ART and Termux-X11 need these system paths even
     // for --help. Never forward credentials or preload hooks.
@@ -59,6 +59,45 @@ function fileExists(path: string): boolean {
   try { return existsSync(path) && statSync(path).isFile(); } catch { return false; }
 }
 
+export type ResolvedShell = { path: string; args: string[] };
+
+function resolvePosixShell(source: NodeJS.ProcessEnv): ResolvedShell {
+  const dirs = [
+    ...(source.PATH ?? "").split(":").filter(Boolean),
+    ...(source.PREFIX ? [join(source.PREFIX, "bin")] : []),
+    "/data/data/com.termux/files/usr/bin", "/usr/local/bin", "/usr/bin", "/bin"
+  ];
+  const executable = (name: string): string | undefined => {
+    const paths = isAbsolute(name) || name.includes("/") ? [name] : dirs.map((dir) => join(dir, name));
+    return paths.find((path) => {
+      try { return statSync(path).isFile() && (accessSync(path, constants.X_OK), true); }
+      catch { return false; }
+    });
+  };
+  const configured = source.MCP_RELAY_BASH;
+  if (configured && !executable(configured)) throw new Error("configured MCP_RELAY_BASH is not an executable shell");
+  const candidates = [
+    configured, source.PREFIX ? join(source.PREFIX, "bin", "bash") : undefined,
+    "bash", "/bin/bash", "/usr/local/bin/bash", "/usr/bin/bash", source.SHELL,
+    "/system/bin/sh", "/bin/sh", "sh"
+  ].filter((item): item is string => Boolean(item));
+  for (const candidate of candidates) {
+    const path = executable(candidate);
+    if (path) return { path, args: /bash$/i.test(basename(path)) ? ["--noprofile", "--norc", "-c"] : ["-c"] };
+  }
+  throw new Error("no executable shell found; install bash or set MCP_RELAY_BASH");
+}
+
+/** Preserve portable POSIX shell resolution without implicit login profiles. */
+export function resolveShell(
+  platform: NodeJS.Platform = process.platform,
+  source: NodeJS.ProcessEnv = process.env
+): ResolvedShell {
+  return platform === "win32"
+    ? { path: resolveShellProgram("bash", platform, source), args: ["--noprofile", "--norc", "-c"] }
+    : resolvePosixShell(source);
+}
+
 export function resolveShellProgram(
   kind: ShellKind,
   platform: NodeJS.Platform = process.platform,
@@ -66,8 +105,7 @@ export function resolveShellProgram(
 ): string {
   if (platform !== "win32") {
     if (kind === "powershell") throw new Error("powershell is available only on Windows devices; use bash");
-    // Termux installs bash in its private PATH, not /bin.
-    return platform === "android" ? "bash" : "/bin/bash";
+    return resolvePosixShell(source).path;
   }
   const value = (name: string) => environmentValue(source, name, platform);
   const candidates: string[] = [];
@@ -177,9 +215,12 @@ export function runShell(
 ): Promise<ShellResult> {
   signal?.throwIfAborted();
   const cwd = cwdInput ? resolveInsideRoot(root, cwdInput) : root;
-  const shell = resolveShellProgram(kind, platform);
+  const resolved = kind === "powershell"
+    ? { path: resolveShellProgram(kind, platform), args: powershellArguments(command) }
+    : resolveShell(platform);
+  const shell = resolved.path;
   const env = shellEnvironment(platform);
-  const args = kind === "powershell" ? powershellArguments(command) : ["--noprofile", "--norc", "-c", command];
+  const args = kind === "powershell" ? resolved.args : [...resolved.args, command];
   return new Promise((resolve, reject) => {
     const child = spawn(shell, args, {
       cwd,

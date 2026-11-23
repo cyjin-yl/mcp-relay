@@ -8,7 +8,7 @@ import { runShell, shellEnvironment } from "../src/shell.js";
 afterEach(() => vi.unstubAllEnvs());
 
 it("restores only Android's required runtime paths while filtering credentials", () => {
-  const keys = ["ANDROID_DATA", "ANDROID_ROOT", "ANDROID_RUNTIME_ROOT", "ANDROID_ART_ROOT",
+  const keys = ["PREFIX", "ANDROID_DATA", "ANDROID_ROOT", "ANDROID_RUNTIME_ROOT", "ANDROID_ART_ROOT",
     "ANDROID_I18N_ROOT", "ANDROID_TZDATA_ROOT", "BOOTCLASSPATH", "DEX2OATBOOTCLASSPATH"];
   for (const key of keys) vi.stubEnv(key, `/system/test/${key}`);
   vi.stubEnv("NPM_TOKEN", "test-token-do-not-forward");
