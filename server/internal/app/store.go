@@ -118,6 +118,25 @@ CREATE TABLE IF NOT EXISTS devices (
   revoked_at INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS devices_user_slug ON devices(user_id, slug);
+CREATE TABLE IF NOT EXISTS device_shares (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  audience TEXT NOT NULL,
+  claim_hash TEXT UNIQUE,
+  access_hash TEXT UNIQUE,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  claimed_at INTEGER,
+  revoked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS device_shares_user ON device_shares(user_id, created_at);
+CREATE TABLE IF NOT EXISTS device_share_devices (
+  share_id TEXT NOT NULL REFERENCES device_shares(id) ON DELETE CASCADE,
+  device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+  PRIMARY KEY (share_id, device_id)
+);
 CREATE TABLE IF NOT EXISTS pairing_codes (
   code_hash TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -332,6 +351,10 @@ func (s *Store) Prune() {
 		_, _ = s.DB.Exec(q, now)
 	}
 	_, _ = s.DB.Exec(`DELETE FROM audit_log WHERE created_at < ?`, now-30*24*3600)
+	// Keep recent share history visible in the console, but destroy expired
+	// credentials immediately; authorization does not depend on this sweep.
+	_, _ = s.DB.Exec(`UPDATE device_shares SET claim_hash = NULL, access_hash = NULL WHERE expires_at <= ? OR revoked_at IS NOT NULL`, now)
+	_, _ = s.DB.Exec(`DELETE FROM device_shares WHERE expires_at < ?`, now-30*24*3600)
 }
 
 func nullString(v string) any {

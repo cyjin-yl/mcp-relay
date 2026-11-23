@@ -31,6 +31,8 @@ type App struct {
 	mcpDeviceLimiter    *limiter
 	mcpAggregateLimiter *limiter
 	pairLimiter         *limiter
+	shareCallsMu        sync.Mutex
+	shareCalls          map[string]map[*shareInvocation]struct{}
 }
 
 func New(cfg Config) (*App, error) {
@@ -77,6 +79,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	a.registerGitHubRoutes(mux)
 	a.registerWebRoutes(mux)
 	a.registerAPIRoutes(mux)
+	a.registerShareRoutes(mux)
 	a.registerMCPRoutes(mux)
 	a.registerDeviceRoutes(mux)
 	mux.HandleFunc("GET /static/app.css", func(w http.ResponseWriter, _ *http.Request) {

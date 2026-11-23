@@ -112,4 +112,9 @@ type VerifiedToken struct {
 	ClientID string
 	Scopes   []string
 	Audience string
+	// A delegated token remains a distinct principal. An empty set never
+	// expands a share to all of its owner's devices.
+	ShareID          string
+	ExpiresAt        int64
+	AllowedDeviceIDs map[string]bool
 }

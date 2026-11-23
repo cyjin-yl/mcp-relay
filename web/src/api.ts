@@ -38,6 +38,32 @@ export interface Invite {
   expiresAt: number
 }
 
+export type ShareStatus = 'pending' | 'active' | 'expired' | 'revoked'
+
+export interface DeviceShare {
+  id: string
+  label: string
+  devices: Pick<Device, 'id' | 'slug' | 'name'>[]
+  scopes: string[]
+  createdAt: number
+  expiresAt: number
+  claimedAt: number
+  revokedAt: number
+  status: ShareStatus
+}
+
+export interface CreateShareInput {
+  label: string
+  deviceIds: string[]
+  permission: 'read' | 'write'
+  ttlSeconds: number
+}
+
+export interface CreatedShare {
+  share: DeviceShare
+  claimUrl: string
+}
+
 export class HttpError extends Error {
   readonly status: number
 
@@ -144,4 +170,22 @@ export async function fetchAudit(): Promise<AuditEntry[]> {
 
 export function createInvite(): Promise<Invite> {
   return request<Invite>('/api/invites', { method: 'POST' })
+}
+
+export async function fetchShares(): Promise<DeviceShare[]> {
+  const data = await request<{ shares: DeviceShare[] }>('/api/shares', { cache: 'no-store' })
+  return data.shares
+}
+
+export function createShare(input: CreateShareInput): Promise<CreatedShare> {
+  return request<CreatedShare>('/api/shares', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+    cache: 'no-store',
+  })
+}
+
+export function revokeShare(id: string): Promise<{ ok: true }> {
+  return request<{ ok: true }>(`/api/shares/${encodeURIComponent(id)}/revoke`, { method: 'POST' })
 }

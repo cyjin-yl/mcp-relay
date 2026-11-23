@@ -178,6 +178,11 @@ func (d *LiveDevice) call(ctx context.Context, tool string, args json.RawMessage
 		return CallToolResult{}, err
 	}
 	deadline := time.Now().Add(timeout)
+	// The device's queue-inclusive budget must also end at the caller's
+	// authorization deadline, even if a later cancel frame cannot arrive.
+	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) {
+		deadline = parentDeadline
+	}
 	callCtx, cancel := context.WithDeadline(ctx, deadline.Add(deviceResponseGrace))
 	defer cancel()
 	d.pendingMu.Lock()
@@ -228,6 +233,14 @@ func (d *LiveDevice) call(ctx context.Context, tool string, args json.RawMessage
 func (d *LiveDevice) sendCall(ctx context.Context, deadline time.Time, id, tool string, args json.RawMessage) error {
 	d.writeMu.Lock()
 	defer d.writeMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if authorize, ok := ctx.Value(deviceDispatchGuardKey{}).(func() error); ok {
+		if err := authorize(); err != nil {
+			return err
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}

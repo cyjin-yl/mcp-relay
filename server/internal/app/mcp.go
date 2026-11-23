@@ -98,6 +98,15 @@ func (a *App) mcpPost(w http.ResponseWriter, r *http.Request) {
 		writeRPCError(w, idOrNull(req.ID), -32600, "invalid request")
 		return
 	}
+	// Reading the body may outlive a temporary grant. Revalidate after that
+	// boundary for discovery as well as execution, and refresh its device set.
+	if token.ShareID != "" {
+		token, ok = a.verifyBearer(r)
+		if !ok {
+			a.sendUnauthorized(w)
+			return
+		}
+	}
 	if !a.allowMCPBucket(w, token, &req) {
 		return
 	}
@@ -123,7 +132,7 @@ func (a *App) mcpPost(w http.ResponseWriter, r *http.Request) {
 				"tools": map[string]any{"listChanged": false},
 			},
 			"serverInfo":   map[string]any{"name": "mcp-relay", "version": "0.1.0"},
-			"instructions": mcpInstructions,
+			"instructions": instructionsForToken(token),
 		})
 	case "notifications/initialized", "notifications/cancelled":
 		w.WriteHeader(http.StatusAccepted)
@@ -143,7 +152,7 @@ func (a *App) mcpPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		tools := []Tool{devicesListTool(), deviceToolsListTool(), deviceCallTool()}
-		tools = append(tools, a.registry.ToolsForUser(token.UserID)...)
+		tools = append(tools, a.toolsForToken(token)...)
 		writeRPCResult(w, req.ID, map[string]any{"tools": tools})
 	case "tools/call":
 		if notification {
@@ -197,7 +206,7 @@ func (a *App) mcpExecutionDevice(userID string, req *rpcRequest) string {
 func (a *App) allowMCPBucket(w http.ResponseWriter, token *VerifiedToken, req *rpcRequest) bool {
 	key := token.UserID + "|" + token.ClientID
 	bucket, scope := a.mcpLimiter, "control"
-	if deviceID := a.mcpExecutionDevice(token.UserID, req); deviceID != "" {
+	if deviceID := a.mcpExecutionDevice(token.UserID, req); deviceID != "" && token.allowsDevice(deviceID) {
 		bucket, scope = a.mcpDeviceLimiter, "device"
 		key += "|" + deviceID
 	}
@@ -250,13 +259,13 @@ func (a *App) mcpToolCall(ctx context.Context, w http.ResponseWriter, req rpcReq
 			a.sendInsufficientScope(w, scopeRead)
 			return
 		}
-		result := a.devicesListResult(token.UserID)
+		result := a.devicesListResult(token)
 		a.store.Audit(token.UserID, token.ClientID, "", params.Name, hashToken(string(args)), "ok", "", time.Since(start).Milliseconds())
 		writeRPCResult(w, req.ID, result)
 		return
 	}
 	device, tool, found := a.registry.FindTool(token.UserID, params.Name)
-	if !found {
+	if !found || !token.allowsDevice(device.ID) {
 		result := textResult("unknown tool: "+params.Name+" (call devices_list and refresh tools)", true)
 		a.store.Audit(token.UserID, token.ClientID, "", params.Name, hashToken(string(args)), "error", "tool_not_found", time.Since(start).Milliseconds())
 		writeRPCResult(w, req.ID, result)
@@ -270,7 +279,7 @@ func (a *App) mcpToolCall(ctx context.Context, w http.ResponseWriter, req rpcReq
 		a.sendInsufficientScope(w, needed)
 		return
 	}
-	result, err := device.call(ctx, tool.Name, args, toolExecutionTimeout(tool.Name, args))
+	result, err := a.callAuthorizedDevice(ctx, token, device, tool, args)
 	status := "ok"
 	errCode := ""
 	if err != nil {
@@ -282,10 +291,10 @@ func (a *App) mcpToolCall(ctx context.Context, w http.ResponseWriter, req rpcReq
 	writeRPCResult(w, req.ID, result)
 }
 
-func (a *App) devicesListResult(userID string) CallToolResult {
+func (a *App) devicesListResult(token *VerifiedToken) CallToolResult {
 	rows, err := a.store.DB.Query(
 		`SELECT id, slug, name, COALESCE(platform, ''), COALESCE(arch, ''), packs, COALESCE(last_seen_at, 0)
-		   FROM devices WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC`, userID)
+		   FROM devices WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC`, token.UserID)
 	type view struct {
 		ID       string   `json:"id"`
 		Slug     string   `json:"slug"`
@@ -303,6 +312,9 @@ func (a *App) devicesListResult(userID string) CallToolResult {
 			var id, slug, name, platform, arch, packs string
 			var lastSeen int64
 			if rows.Scan(&id, &slug, &name, &platform, &arch, &packs, &lastSeen) != nil {
+				continue
+			}
+			if !token.allowsDevice(id) {
 				continue
 			}
 			out = append(out, view{
@@ -367,13 +379,22 @@ func (a *App) mcpDeviceToolsList(w http.ResponseWriter, req rpcRequest, token *V
 		return
 	}
 	device, ok := a.registry.FindDevice(token.UserID, params.Device)
-	if !ok {
+	if !ok || !token.allowsDevice(device.ID) {
 		writeRPCResult(w, req.ID, textResult("device is not online or does not belong to this account; call devices_list", true))
 		return
 	}
+	tools := device.Tools
+	if token.ShareID != "" {
+		tools = []Tool{}
+		for _, tool := range device.Tools {
+			if tokenAllowsTool(token, tool) {
+				tools = append(tools, tool)
+			}
+		}
+	}
 	writeRPCResult(w, req.ID, jsonResult(map[string]any{
 		"device": map[string]any{"id": device.ID, "slug": device.Slug, "name": device.Name},
-		"tools":  device.Tools,
+		"tools":  tools,
 	}))
 }
 
@@ -397,7 +418,7 @@ func (a *App) mcpDeviceCall(ctx context.Context, w http.ResponseWriter, req rpcR
 		return
 	}
 	device, ok := a.registry.FindDevice(token.UserID, params.Device)
-	if !ok {
+	if !ok || !token.allowsDevice(device.ID) {
 		writeRPCResult(w, req.ID, textResult("device is not online or does not belong to this account; call devices_list", true))
 		return
 	}
@@ -413,6 +434,9 @@ func (a *App) mcpDeviceCall(ctx context.Context, w http.ResponseWriter, req rpcR
 	if !found {
 		names := make([]string, 0, len(device.Tools))
 		for _, candidate := range device.Tools {
+			if token.ShareID != "" && !tokenAllowsTool(token, candidate) {
+				continue
+			}
 			names = append(names, candidate.Name)
 		}
 		writeRPCResult(w, req.ID, textResult("unknown tool "+params.Tool+" on "+device.Slug+"; call device_tools_list. Available: "+strings.Join(names, ", "), true))
@@ -427,7 +451,7 @@ func (a *App) mcpDeviceCall(ctx context.Context, w http.ResponseWriter, req rpcR
 		return
 	}
 	start := time.Now()
-	result, err := device.call(ctx, target.Name, callArgs, toolExecutionTimeout(target.Name, callArgs))
+	result, err := a.callAuthorizedDevice(ctx, token, device, target, callArgs)
 	status := "ok"
 	errCode := ""
 	if err != nil {

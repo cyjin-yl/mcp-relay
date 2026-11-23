@@ -13,6 +13,7 @@ import {
   type PairingCode,
 } from './api'
 import { brand, renderLogin, renderPending } from './screens'
+import { createShareManager } from './shares'
 import {
   closeDialog,
   copyText,
@@ -373,6 +374,13 @@ export function mountDashboard(host: HTMLElement, me: Me): void {
     inviteResult,
   )
 
+  const sharesManager = createShareManager({
+    announce,
+    onError: handleError,
+    refreshDevices,
+    onChange: () => { void refreshAudit() },
+  })
+
   const tabsRoot = proto(
     'proto-ui-shadcn-tabs-root',
     { defaultValue: 'devices' },
@@ -381,6 +389,7 @@ export function mountDashboard(host: HTMLElement, me: Me): void {
   const tabsList = el('proto-ui-shadcn-tabs-list')
   tabsList.append(
     proto('proto-ui-shadcn-tabs-trigger', { value: 'devices' }, {}, '设备'),
+    proto('proto-ui-shadcn-tabs-trigger', { value: 'shares' }, {}, '临时分享'),
     proto('proto-ui-shadcn-tabs-trigger', { value: 'audit' }, {}, '审计'),
   )
   if (me.isAdmin) {
@@ -399,7 +408,13 @@ export function mountDashboard(host: HTMLElement, me: Me): void {
     { class: 'tab-panel' },
     auditCard,
   )
-  tabsRoot.append(tabsList, devicesPanel, auditPanel)
+  const sharesPanel = proto(
+    'proto-ui-shadcn-tabs-content',
+    { value: 'shares' },
+    { class: 'tab-panel' },
+    sharesManager.element,
+  )
+  tabsRoot.append(tabsList, devicesPanel, sharesPanel, auditPanel)
   if (me.isAdmin) {
     tabsRoot.append(
       proto('proto-ui-shadcn-tabs-content', { value: 'invites' }, { class: 'tab-panel' }, invitesCard),
@@ -433,7 +448,7 @@ export function mountDashboard(host: HTMLElement, me: Me): void {
             'div',
             {},
             el('h1', {}, '控制台'),
-            el('p', { class: 'muted' }, '管理设备、配对码和工具调用审计。'),
+            el('p', { class: 'muted' }, '管理设备、临时分享和工具调用审计。'),
           ),
           connectionHelpDialog(),
         ),
@@ -442,9 +457,9 @@ export function mountDashboard(host: HTMLElement, me: Me): void {
       ),
     ),
   )
-  document.title = '设备 · mcp-relay'
+  document.title = '控制台 · mcp-relay'
 
-  void Promise.all([refreshDevices(), refreshAudit()])
+  void Promise.all([refreshDevices(), refreshAudit(), sharesManager.refresh()])
 
   function revokeDialog(device: Device): HTMLElement {
     const dialog = el('proto-ui-shadcn-dialog-root', { class: 'dialog-inline' })
@@ -477,7 +492,7 @@ export function mountDashboard(host: HTMLElement, me: Me): void {
           await revokeDevice(device.id)
           closeDialog(dialog)
           announce(`已撤销 ${device.name}。`, 'success')
-          await Promise.all([refreshDevices(), refreshAudit()])
+          await Promise.all([refreshDevices(), refreshAudit(), sharesManager.refresh()])
         } catch (error) {
           handleError(error)
         }
@@ -600,7 +615,9 @@ export function mountDashboard(host: HTMLElement, me: Me): void {
     try {
       devices = await fetchDevices()
       renderDeviceRows()
+      sharesManager.setDevices(devices)
     } catch (error) {
+      sharesManager.setDevicesError()
       handleError(error)
     }
   }

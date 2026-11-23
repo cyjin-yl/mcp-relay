@@ -1,0 +1,81 @@
+name: Server and console acceptance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'server/**'
+      - 'web/**'
+      - 'scripts/share-browser-smoke.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'packages/device/package.json'
+      - '.github/workflows/server-console.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'server/**'
+      - 'web/**'
+      - 'scripts/share-browser-smoke.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'packages/device/package.json'
+      - '.github/workflows/server-console.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-console-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+      - name: Install fixture and console dependencies
+        run: |
+          npm ci
+          npm --prefix web ci
+      - name: Run complete Go suite
+        working-directory: server
+        run: go test ./... -count=1
+      - name: Check temporary access races
+        working-directory: server
+        # The existing 20 MiB native-result test has a separate timing budget;
+        # this feature's race gate covers all share authorization and API cases.
+        run: go test -race ./internal/app -run '^TestShare' -count=1
+      - name: Build and lint the production console
+        run: |
+          npm --prefix web run build
+          npm --prefix web run lint
+      - name: Install real Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: Exercise browser, API and device transport together
+        env:
+          QA_ARTIFACT_DIR: ${{ runner.temp }}/relay-share-browser-evidence
+        run: node scripts/share-browser-smoke.mjs
+      - name: Upload redacted screenshots and acceptance receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: temporary-device-share-acceptance
+          path: ${{ runner.temp }}/relay-share-browser-evidence/
+          if-no-files-found: warn
+          retention-days: 14
