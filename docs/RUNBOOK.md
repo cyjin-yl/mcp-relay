@@ -339,3 +339,17 @@ curl -sS -o /dev/null -D - -X POST https://relay.cyjin.dev/mcp \
 | 证书过期 | `openssl x509 -enddate`、`certbot renew --dry-run` | 修 deploy hook 或轮换 Origin CA 证书 |
 | 磁盘告警 | `df -h /var`、备份目录、SQLite WAL 大小 | 清理旧备份；`PRAGMA wal_checkpoint(TRUNCATE)` |
 
+
+## Backup and monitoring
+
+- Daily SQLite backup: `mcp-relay-backup.timer` (03:20 UTC, `Persistent=true`) runs
+  `/usr/local/bin/mcp-relay-backup`, writes `/var/backups/mcp-relay/relay-<UTC>.sqlite`
+  via Python's `sqlite3.backup`, verifies `PRAGMA integrity_check`, and deletes
+  backups older than 14 days.
+- Check: `systemctl list-timers mcp-relay-backup.timer` and
+  `ls -lh /var/backups/mcp-relay | tail`.
+- Uptime Kuma monitor `mcp-relay — public health` (id 53) checks
+  `https://relay.cyjin.dev/healthz` every 60 s from CT102; it proves only the
+  public Cloudflare → Caddy → Go health path, not OAuth, MCP tools or device
+  online state.
+- Kuma policy mirror: `life/areas/technology/home-lab/doesvm/kuma-monitor-policy.json`.

@@ -37,7 +37,7 @@ flowchart LR
 - `minimal`：`read` `write` `edit` `bash` `grep` `find` `ls`
 - `omp`：`omp_read` `omp_hash` `omp_apply_patch`（`*** Begin Patch` + expected SHA-256）
   `omp_glob` `omp_grep` `omp_ast_grep`（需 ast-grep）
-- 搜索优先 `rg`，回退到有界 JS 扫描；`kernel` 持久 code mode 尚未发布。
+- 搜索优先 `rg`，回退到有界 JS 扫描；`kernel` 持久 code mode 从 0.1.3 起 opt-in（`--allow-kernel`）。
 
 scope：`readOnlyHint=true` → `relay.read`；其余 → `relay.write`。`tools/list` 需要 `relay.read`。
 写工具在 ChatGPT 默认需要确认。
@@ -76,7 +76,7 @@ scope：`readOnlyHint=true` → `relay.read`；其余 → `relay.write`。`tools
 - [x] MCP endpoint、`devices_list`、scope 强制、审计
 - [x] WSS 设备注册、心跳、重连、工具路由、配对
 - [x] 设备 CLI：minimal + omp + rg/ast-grep、路径约束、patch 哈希
-- [x] npm `@cyjin/mcp-relay@0.1.2`（read-before-edit、bash_confirm、路径硬化）
+- [x] npm `@cyjin/mcp-relay@0.1.3`（read-before-edit、bash_confirm、kernel、路径硬化）
 - [x] OVH + Caddy + Cloudflare 部署；生产 WSS/MCP 端到端验证
 - [x] life keyring 存入 GitHub OAuth 与 npm token；credential records 已提交
 - [x] Go/TS 测试：OAuth、refresh 重放、scope、跨用户、patch、glob 逃逸、read-before-edit、bash_confirm
@@ -87,10 +87,10 @@ scope：`readOnlyHint=true` → `relay.read`；其余 → `relay.write`。`tools
 
 - [ ] Proto-UI 0.3.0-alpha.1 **Web Components + shadcn Rhea** 控制台（`web/`，`/app/`）
 - [ ] 控制台内的 ChatGPT/Claude 接入说明（服务端 dashboard 已有简版）
-- [ ] 生产浏览器验证：配对码 → 设备在线 → ChatGPT/Claude 完成 OAuth
-- [x] `@cyjin/mcp-relay@0.1.2` 注册表可见性确认
-- [ ] kernel pack（持久 code mode，默认关闭）
-- [ ] 备份定时任务（SQLite `.backup`）与监控
+- [x] 生产浏览器验证：真实 Chromium 通过 `/app` 查看在线设备并完成 OAuth consent → token 200
+- [x] `@cyjin/mcp-relay@0.1.3` 注册表可见性确认（kernel pack 已启用）
+- [x] kernel pack（持久 code mode，`--allow-kernel` 显式开启）
+- [x] 备份定时任务（`mcp-relay-backup.timer`，每日 03:20 UTC，14 天保留）+ Kuma monitor `mcp-relay — public health`
 
 ## 7. 关键约束
 

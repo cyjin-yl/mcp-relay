@@ -27,12 +27,14 @@ The process stays connected, reconnects automatically, and responds to heartbeat
 | `--url <url>` | Relay base URL (default: `https://relay.cyjin.dev`) |
 | `--config <path>` | Device config path (default: `~/.mcp-relay/device.json`) |
 | `--no-shell` | Disable the `bash` tool |
-| `--allow-kernel` | Reserved for the optional persistent kernel |
+| `--allow-kernel` | Enable the opt-in persistent `kernel` pack (VM, not a security boundary) |
 
 ## Tool packs
 
 **minimal** (Pi-style): `read`, `write`, `edit`, `bash`, `bash_confirm`, `grep`, `find`, `ls`.
 Search uses `rg` when installed and falls back to a bounded JS scanner.
+
+**kernel** (opt-in, `--packs kernel --allow-kernel`): `kernel_eval`, `kernel_reset` with a persistent JS context and root-confined `relay.readFile/writeFile/list` helpers.
 
 **omp**: `omp_read` (`:50-80` selectors), `omp_hash`, `omp_apply_patch`
 (`*** Begin Patch`; `expected_hashes` is required for updates/deletes), `omp_glob`, `omp_grep`,

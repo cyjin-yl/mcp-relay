@@ -91,7 +91,7 @@ export function renderIntro(host: HTMLElement): void {
       'ol',
       { class: 'intro-step-list' },
       stepCard('1', 'GitHub 登录并生成配对码', 'GitHub 登录后直接在控制台生成一次性配对码。'),
-      stepCard('2', '在设备上运行 npx', 'npx -y @cyjin/mcp-relay@0.1.2 connect --code XXXX-XXXX --root ~/code'),
+      stepCard('2', '在设备上运行 npx', 'npx -y @cyjin/mcp-relay@0.1.3 connect --code XXXX-XXXX --root ~/code'),
       stepCard('3', '在 ChatGPT / Claude 添加 MCP', 'Plugins → Add custom MCP server，URL 填 https://relay.cyjin.dev/mcp，认证选 OAuth；Claude 在 Connectors 里添加。'),
     ),
     el(

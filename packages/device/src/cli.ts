@@ -9,11 +9,12 @@ import { pairDevice } from "./pairing.js";
 import { createRoot } from "./paths.js";
 import { createMinimalPack } from "./packs/minimal.js";
 import { createOmpPack } from "./packs/omp.js";
+import { createKernelPack } from "./packs/kernel.js";
 import type { ToolPack } from "./pack.js";
 
-const VERSION = "0.1.2";
+const VERSION = "0.1.3";
 const DEFAULT_URL = "https://relay.cyjin.dev";
-const SUPPORTED_PACKS: Record<string, true> = { minimal: true, omp: true };
+const SUPPORTED_PACKS: Record<string, true> = { minimal: true, omp: true, kernel: true };
 
 const HELP = `mcp-relay ${VERSION}
 
@@ -24,13 +25,13 @@ Usage:
 Options:
   --code <code>       One-time pairing code from the relay dashboard
   --root <dir>        Confine all file tools to this directory (default: cwd)
-  --packs <list>      Comma-separated tool packs: minimal,omp (default: minimal,omp)
+  --packs <list>      Comma-separated tool packs: minimal,omp,kernel (default: minimal,omp)
   --name <name>       Device name shown in the dashboard (default: hostname)
   --url <url>         Relay base URL (default: ${DEFAULT_URL})
   --config <path>     Device config path (default: ~/.mcp-relay/device.json)
   --allow-shell       Enable the bash tool (default: on)
   --no-shell          Disable the bash tool
-  --allow-kernel      Enable the persistent code kernel when implemented
+  --allow-kernel      Enable the persistent code kernel (opt-in; VM is not a security boundary)
   --verbose           Log every tool call
   --help              Show this help
   --version           Show the version
@@ -133,7 +134,8 @@ async function main(): Promise<number> {
   if (packsInput.includes("minimal")) packs.push(createMinimalPack());
   if (packsInput.includes("omp")) packs.push(createOmpPack());
   if (packsInput.includes("kernel")) {
-    throw new Error("kernel pack is not shipped in this build; use --packs minimal,omp");
+    if (!allowKernel) throw new Error("kernel pack requires --allow-kernel");
+    packs.push(createKernelPack());
   }
 
   log(`serving ${packs.length} pack(s) from ${root}`);
