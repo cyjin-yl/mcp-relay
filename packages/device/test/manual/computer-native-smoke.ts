@@ -29,6 +29,21 @@ function data(result: Result): Record<string, unknown> {
   const part = result.content?.find(item => item.type === "text" && item.text);
   return JSON.parse(part?.text ?? "{}") as Record<string, unknown>;
 }
+function shellStdout(result: Result): string {
+  const body = (result.content ?? []).filter(item => item.type === "text").map(item => item.text ?? "").join("\n");
+  assert.notEqual(result.isError, true, body);
+  assert(body.startsWith("exit_code: 0\n"), body);
+  const start = body.indexOf("stdout:\n"), end = body.indexOf("\nstderr:", start);
+  assert(start >= 0 && end > start, body);
+  return body.slice(start + "stdout:\n".length, end).trim();
+}
+function isCaptureDenied(info: ComputerState): boolean {
+  if (process.platform === "darwin" && info.available) {
+    assert(info.permissions.screenCapture === "granted" || info.permissions.screenCapture === "denied",
+      "An unknown macOS capture permission is a native helper failure, not an OS permission blocker.");
+  }
+  return info.permissions.screenCapture === "denied";
+}
 type NativeRuntimeObserver = { child: ChildProcess; readyPath: string; proofPath: string; log(): string };
 function observeWorkerPowerShell(workerPid: number, evidence: string): NativeRuntimeObserver {
   const readyPath = join(evidence, "runtime-observer-ready"), proofPath = join(evidence, "native-runtime-observed.json");
@@ -68,9 +83,10 @@ function fixtureWorkerEnvironment(powerShell: string): NodeJS.ProcessEnv {
     MCP_RELAY_LAUNCHED: "0", MCP_RELAY_START_DRAINED: "0" };
   if (process.platform === "win32" && powerShell === "5.1") {
     // Only this synthetic worker's environment changes. Production discovery
-    // chooses its real system fallback; there is no backend override.
+    // chooses its real system fallback; there is no backend override. Removing
+    // only this worker\'s optional analysis-cache key also proves cache-free startup.
     for (const key of Object.keys(result)) {
-      if (["programfiles", "programw6432"].includes(key.toLowerCase())) delete result[key];
+      if (["programfiles", "programw6432", "psmoduleanalysiscachepath"].includes(key.toLowerCase())) delete result[key];
       if (key.toLowerCase() === "path") result[key] = (result[key] ?? "").split(";")
         .filter(directory => !existsSync(win32.join(directory.replace(/^"|"$/g, ""), "pwsh.exe"))).join(";");
     }
@@ -227,6 +243,27 @@ async function main(): Promise<void> {
         }
       });
     }
+    if (process.platform === "win32") {
+      report.workerConditions = { requestedPowerShell: powerShell, analysisCachePathRemoved: powerShell === "5.1" };
+      await check("minimal PowerShell tool preserves Unicode and the selected runtime", async () => {
+        assert(hello.tools?.some(tool => tool.name === "powershell"));
+        const result = await call("powershell", { timeout_ms: 15000, command:
+          "[pscustomobject]@{unicode='relay 中文🙂';version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;" +
+          "cachePresent=($null -ne [Environment]::GetEnvironmentVariable('PSModuleAnalysisCachePath'));marker=$env:MCP_RELAY}|ConvertTo-Json -Compress" });
+        const observed = JSON.parse(shellStdout(result)) as { unicode: string; version: string; edition: string; cachePresent: boolean; marker: string };
+        assert.equal(observed.unicode, "relay 中文🙂");
+        assert.equal(observed.marker, "1");
+        if (powerShell === "5.1") {
+          assert.match(observed.version, /^5\.1\./);
+          assert.equal(observed.edition, "Desktop");
+          assert.equal(observed.cachePresent, false, "The synthetic PS5.1 worker must succeed without an analysis-cache environment key.");
+        } else if (powerShell === "7") {
+          assert.match(observed.version, /^7\./);
+          assert.equal(observed.edition, "Core");
+        }
+        report.minimalPowerShell = observed;
+      });
+    }
     assert.notEqual(infoResult.isError, true, JSON.stringify(data(infoResult)));
     let info = data(infoResult) as unknown as ComputerState & { enabled: boolean };
     report.capabilities = info;
@@ -236,14 +273,14 @@ async function main(): Promise<void> {
       for (const name of ["computer_info", "computer_screenshot", "computer_action"]) assert(hello.tools?.some(tool => tool.name === name));
       assert.equal(info.backend, process.platform === "win32" ? "windows-win32" : "macos-quartz");
     });
-    let captureDenied = info.permissions.screenCapture === "denied" || (process.platform === "darwin" && info.available && info.permissions.screenCapture !== "granted");
+    let captureDenied = isCaptureDenied(info);
     if (info.available && !captureDenied) {
       fixture = startNativeFixture(process.platform, evidence);
       fixture.child.once("error", error => { log += "\nfixture: " + String(error); });
       await focused();
       info = data(await call("computer_info", {})) as unknown as ComputerState & { enabled: boolean };
       report.capabilities = info;
-      captureDenied = info.permissions.screenCapture === "denied" || (process.platform === "darwin" && info.available && info.permissions.screenCapture !== "granted");
+      captureDenied = isCaptureDenied(info);
     }
     if (!info.available || captureDenied || info.permissions.input === "denied" || info.actions.length === 0) {
       await check("OS/session permission blocker is explicit and never reported as UI success", async () => {

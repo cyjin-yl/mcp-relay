@@ -41,7 +41,7 @@ export function shellEnvironment(
     // per name so Node does not pick a different duplicate PATH entry.
     keys.push("SYSTEMROOT", "WINDIR", "COMSPEC", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
       "TEMP", "TMP", "PATHEXT", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432",
-      "SYSTEMDRIVE", "PSMODULEPATH");
+      "SYSTEMDRIVE", "PSMODULEPATH", "PSMODULEANALYSISCACHEPATH");
   }
   for (const key of keys) {
     const value = environmentValue(source, key, platform);
@@ -153,12 +153,15 @@ function powershellArguments(command: string): string[] {
   // UTF-16LE -EncodedCommand preserves quotes, Unicode and multiline scripts
   // without passing through cmd.exe; output is consistently UTF-8 even on 5.1.
   const script = [
-    "$relayUtf8 = New-Object System.Text.UTF8Encoding($false)",
+    "$ErrorActionPreference = 'Stop'",
+    "$ProgressPreference = 'SilentlyContinue'",
+    // Load the runtime's own standard cmdlets without module discovery. PS5.1
+    // can otherwise stall before the first command when its cache path is absent.
+    "Import-Module ([IO.Path]::Combine($PSHOME, 'Modules', 'Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Utility.psd1')) -ErrorAction Stop",
+    "$relayUtf8 = [System.Text.UTF8Encoding]::new($false)",
     "[Console]::InputEncoding = $relayUtf8",
     "[Console]::OutputEncoding = $relayUtf8",
     "$OutputEncoding = $relayUtf8",
-    "$ErrorActionPreference = 'Stop'",
-    "$ProgressPreference = 'SilentlyContinue'",
     "$LASTEXITCODE = 0",
     "try {",
     "& {",

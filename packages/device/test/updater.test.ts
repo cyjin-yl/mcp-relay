@@ -294,7 +294,7 @@ it("ignores a downgrade and supports a local check request without changing the 
 });
 
 
-async function fullLauncherFixture(failNewSupervisor = false) {
+async function fullLauncherFixture(failNewSupervisor = false, holdCurrentManifest = false) {
   const root = temporaryDirectory();
   const stateDir = join(root, "controller state");
   const eventsFile = join(root, "controller events.jsonl");
@@ -305,7 +305,7 @@ async function fullLauncherFixture(failNewSupervisor = false) {
   for (const version of ["1.0.0", "1.1.0", "1.2.0"]) {
     const contents = [
       "import { runLauncher, runSupervisor } from " + JSON.stringify(updaterPath) + ";",
-      'import { readFileSync, appendFileSync } from "node:fs";',
+      'import { readFileSync, appendFileSync, existsSync } from "node:fs";',
       'import { join } from "node:path";',
       "const VERSION = " + JSON.stringify(version) + ";",
       'if (process.argv.includes("--version")) { process.stdout.write(VERSION + "\\n"); process.exit(0); }',
@@ -316,9 +316,16 @@ async function fullLauncherFixture(failNewSupervisor = false) {
       '  const isSupervisor = process.env.MCP_RELAY_SUPERVISOR === "1";',
       '  appendFileSync(eventsFile, JSON.stringify({version:VERSION,event:isSupervisor ? "supervisor-entry" : "launcher-entry",pid:process.pid,paused:false}) + "\\n");',
       '  if (isSupervisor && VERSION === "1.1.0" && ' + JSON.stringify(failNewSupervisor) + ') process.exit(52);',
-      '  const fetcher = async (input) => {',
+      '  const fetcher = async (input, init = {}) => {',
       '    const url = new URL(String(input));',
-      '    if (url.pathname.endsWith("stable.json")) return new Response(readFileSync(join(releaseDir,"manifest.json"),"utf8"));',
+      '    if (url.pathname.endsWith("stable.json")) {',
+      '      const manifest = readFileSync(join(releaseDir,"manifest.json"),"utf8");',
+      '      while (' + JSON.stringify(holdCurrentManifest) + ' && JSON.parse(manifest).version === VERSION && !existsSync(join(releaseDir,VERSION+".manifest-ready"))) {',
+      '        if (init.signal?.aborted) throw new Error("fixture manifest check cancelled");',
+      '        await new Promise((resolve) => setTimeout(resolve, 10));',
+      '      }',
+      '      return new Response(manifest);',
+      '    }',
       '    return new Response(readFileSync(join(releaseDir,url.pathname.split("/").pop())));',
       '  };',
       '  const options = {entryPoint:process.argv[1],version:VERSION,args:process.argv.slice(2),relayUrl:"https://relay.example",stateDir,pollIntervalMs:60000,drainTimeoutMs:1000,readyTimeoutMs:2000,stabilityMs:80,log(message){process.stderr.write(message+"\\n");}};',
@@ -353,6 +360,7 @@ async function fullLauncherFixture(failNewSupervisor = false) {
   });
   return {
     stateDir, events, offer, status: () => readUpdateStatus(stateDir),
+    releaseManifestCheck(version: string) { writeFileSync(join(releaseDir, version + ".manifest-ready"), "ready"); },
     async wait(predicate: () => boolean, timeout = 12_000) {
       const end = Date.now() + timeout;
       while (Date.now() < end) {
@@ -382,17 +390,33 @@ async function fullLauncherFixture(failNewSupervisor = false) {
 }
 
 it("hands off the complete supervisor A to B to C without accumulating parent processes", async () => {
-  const h = await fullLauncherFixture();
+  const h = await fullLauncherFixture(false, true);
+  const waitForActiveStatus = async (version: string, phase: "checking" | "running") => {
+    let snapshot: Record<string, unknown> = {};
+    await h.wait(() => {
+      snapshot = h.status();
+      return snapshot.version === version && snapshot.supervisorVersion === version && snapshot.phase === phase
+        && (phase !== "running" || (snapshot.lastResult as { status?: string })?.status === "current")
+        && h.events().some((event) => event.version === version && event.event === "activated");
+    });
+    return snapshot;
+  };
   try {
-    await h.wait(() => h.events().some((event) => event.version === "1.1.0" && event.event === "activated"));
-    expect(h.status()).toMatchObject({ version: "1.1.0", supervisorVersion: "1.1.0", phase: "running" });
+    // A new supervisor immediately checks its manifest after activation. Hold that
+    // response so the former activated-then-read assertion race is deterministic.
+    await waitForActiveStatus("1.1.0", "checking");
+    h.releaseManifestCheck("1.1.0");
+    const b = await waitForActiveStatus("1.1.0", "running");
+    expect(b).toMatchObject({ version: "1.1.0", supervisorVersion: "1.1.0", phase: "running" });
     expect(h.events().filter((event) => event.event === "launcher-entry")).toHaveLength(1);
     expect(h.events().some((event) => event.version === "1.1.0" && event.event === "supervisor-entry")).toBe(true);
     expect(h.livePids()).toHaveLength(3);
     h.offer("1.2.0");
     await requestUpdateCheck(h.stateDir);
-    await h.wait(() => h.events().some((event) => event.version === "1.2.0" && event.event === "activated"));
-    expect(h.status()).toMatchObject({ version: "1.2.0", supervisorVersion: "1.2.0", previousVersion: "1.1.0" });
+    await waitForActiveStatus("1.2.0", "checking");
+    h.releaseManifestCheck("1.2.0");
+    const c = await waitForActiveStatus("1.2.0", "running");
+    expect(c).toMatchObject({ version: "1.2.0", supervisorVersion: "1.2.0", previousVersion: "1.1.0", phase: "running" });
     expect(h.events().filter((event) => event.event === "launcher-entry")).toHaveLength(1);
     expect(h.livePids()).toHaveLength(3);
   } finally { await h.stop(); }

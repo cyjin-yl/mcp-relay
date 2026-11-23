@@ -51,6 +51,7 @@ it("preserves Windows runtime paths case-insensitively without forwarding secret
     UserProfile: "C:\\Users\\测试",
     Temp: "C:\\Users\\测试\\Temp",
     PATHEXT: ".EXE;.CMD",
+    PSModuleAnalysisCachePath: "C:\\Users\\测试\\Cache\\ModuleAnalysisCache",
     NPM_TOKEN: "do-not-forward",
     AWS_SECRET_ACCESS_KEY: "do-not-forward",
     NODE_OPTIONS: "--require unsafe",
@@ -61,6 +62,8 @@ it("preserves Windows runtime paths case-insensitively without forwarding secret
   expect(env.SYSTEMROOT).toBe("C:\\Windows");
   expect(env.USERPROFILE).toBe("C:\\Users\\测试");
   expect(env.TEMP).toBe("C:\\Users\\测试\\Temp");
+  expect(env.PSMODULEANALYSISCACHEPATH).toBe("C:\\Users\\测试\\Cache\\ModuleAnalysisCache");
+  expect(shellEnvironment("win32", {}).PSMODULEANALYSISCACHEPATH).toBeUndefined();
   expect(Object.keys(env).filter((key) => key.toLowerCase() === "path")).toHaveLength(1);
   for (const key of ["NPM_TOKEN", "AWS_SECRET_ACCESS_KEY", "NODE_OPTIONS", "BASH_ENV", "LD_PRELOAD"]) {
     expect(env[key]).toBeUndefined();

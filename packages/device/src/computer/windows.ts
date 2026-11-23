@@ -299,7 +299,12 @@ async function invoke(request: Record<string, unknown>, context: NativeContext):
   const script = WINDOWS_NATIVE.replace("__RELAY_PAYLOAD__", payload);
   // Keep argv far below Windows' command-line limit; action/text are data in the
   // encoded payload and are never interpolated into executable PowerShell.
-  const loader = "[Console]::InputEncoding=New-Object Text.UTF8Encoding($false);& ([scriptblock]::Create([Console]::In.ReadToEnd()))";
+  // Import the installed runtime's exact Utility manifest before its cmdlets.
+  // This avoids PS5.1 scanning arbitrary module paths/cache during startup.
+  const loader = "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';" +
+    "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);" +
+    "Import-Module ([IO.Path]::Combine($PSHOME,'Modules','Microsoft.PowerShell.Utility','Microsoft.PowerShell.Utility.psd1')) -ErrorAction Stop;" +
+    "& ([scriptblock]::Create([Console]::In.ReadToEnd()))";
   const response = await runNative({ command: powershell(),
     args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(loader, "utf16le").toString("base64")],
     input: script, maxOutputBytes: request.op === "screenshot" ? 32 * 1024 * 1024 : 512 * 1024,

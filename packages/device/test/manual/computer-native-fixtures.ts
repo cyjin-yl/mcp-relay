@@ -107,14 +107,14 @@ ObjC.registerSubclass({name:'RelaySmokeTarget',superclass:'NSObject',methods:{
 stage('target-ready');
 // Inherit the actual AppKit method encodings (BOOL differs by architecture).
 // JXA permits omitted types for overrides; custom selectors still declare them.
+// Default AppKit drawing avoids a by-value NSRect callback in this test bridge.
 stage('canvas-register');
 ObjC.registerSubclass({name:'RelaySmokeCanvas',superclass:'NSView',methods:{
  'acceptsFirstResponder':function(){return true;},
  'mouseDown:':function(event){held=true;moved=false;this.window.makeFirstResponder(this);},
  'mouseDragged:':function(event){moves++;moved=true;},
  'mouseUp:':function(event){if(held&&moved)drags++;held=false;},
- 'scrollWheel:':function(event){scrolls++;},
- 'drawRect:':function(rect){$.NSColor.colorWithCalibratedRedGreenBlueAlpha(0.12,0.51,0.70,1).set;$.NSRectFill(rect);}
+ 'scrollWheel:':function(event){scrolls++;}
 }});
 stage('canvas-ready');
 stage('application-create');
@@ -165,7 +165,9 @@ while(Date.now()<deadline&&!$.NSFileManager.defaultManager.fileExistsAtPath(conf
  var event=app.nextEventMatchingMaskUntilDateInModeDequeue(0xffffffff,$.NSDate.dateWithTimeIntervalSinceNow(0.06),$.NSDefaultRunLoopMode,true);
  if(firstEvent){stage('first-event-returned',{isNil:event.isNil()});firstEvent=false;}
  if(!event.isNil())app.sendEvent(event);
+ if(firstState)stage('first-dispatch-finished');
  app.updateWindows;
+ if(firstState)stage('first-windows-updated');
  var visible=!!window.isVisible,active=!!app.isActive,keyWindow=!!window.isKeyWindow;
  if(visible)seenVisible=true;
  var cursor=$.NSEvent.mouseLocation;
