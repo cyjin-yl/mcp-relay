@@ -71,6 +71,12 @@ function fixture(options: {
   return { backend, calls, waits };
 }
 
+function scrollCommands(calls: NativeCommand[]): string[][] {
+  return calls.flatMap(call => String(call.input).split("\n")
+    .filter(line => line.startsWith("'/system/bin/input' 'swipe' "))
+    .map(line => [...line.matchAll(/'([^']*)'/g)].map(match => match[1]!)));
+}
+
 describe("Android display and input metadata", () => {
   it("takes explicitly identified current default display information", () => {
     const text = 'mDisplayInfo=DisplayInfo{"External", displayId 2, real 900 x 600, rotation 0}\n'
@@ -278,6 +284,42 @@ describe("Android computer backend", () => {
     const test = fixture();
     await test.backend.act({ type: "click", x: 300, y: 500 }, { ...display, width: 600, height: 1000, scaleX: 0.5, scaleY: 0.5 }, context);
     expect(String(test.calls.at(-1)?.input)).toContain("'tap' '600' '1000'");
+  });
+  it("uses scroll steps rather than raw pixels, including the omitted default", async () => {
+    const cases = [
+      { amount: undefined, frame: display, expected: ["600", "1180", "600", "820"] },
+      { amount: 3, frame: display, expected: ["600", "1180", "600", "820"] },
+      { amount: 1, frame: display, expected: ["600", "1060", "600", "940"] },
+      // 360 screenshot pixels still pass through the existing scale-to-native mapping.
+      { amount: 3, frame: { ...display, width: 600, height: 1000, scaleX: 0.5, scaleY: 0.5 },
+        expected: ["600", "1360", "600", "640"] }
+    ];
+    for (const item of cases) {
+      const test = fixture();
+      await test.backend.act({ type: "scroll", direction: "down",
+        ...(item.amount === undefined ? {} : { amount: item.amount }) }, item.frame, context);
+      expect(scrollCommands(test.calls)).toEqual([["/system/bin/input", "swipe", ...item.expected, "350"]]);
+    }
+  });
+  it("caps large scroll step requests at the current screenshot axis boundary", async () => {
+    for (const item of [
+      { direction: "down" as const, expected: ["600", "1750", "600", "250"] },
+      { direction: "right" as const, expected: ["1050", "1000", "150", "1000"] }
+    ]) {
+      const test = fixture();
+      await test.backend.act({ type: "scroll", direction: item.direction, amount: 40 }, display, context);
+      expect(scrollCommands(test.calls)).toEqual([["/system/bin/input", "swipe", ...item.expected, "350"]]);
+    }
+  });
+  it("rejects invalid scroll steps before sending any native input", async () => {
+    for (const amount of [0, -1, 1.5, 41, 350, Number.NaN, Number.POSITIVE_INFINITY, null, "3"]) {
+      const test = fixture();
+      await expect(test.backend.act({ type: "scroll", direction: "down", amount: amount as number }, display, context))
+        .rejects.toMatchObject({ code: "invalid_scroll" });
+      // Old pixel semantics accepted fractions, 41 and 350 and submitted a swipe.
+      expect(scrollCommands(test.calls)).toEqual([]);
+      expect(test.calls.every(call => String(call.input).includes("__RELAY_ANDROID_uid__"))).toBe(true);
+    }
   });
   it("does not pretend separate keyevents are a key chord", async () => {
     const test = fixture({ combo: false });

@@ -211,7 +211,7 @@ try {
   const dragged = await probe();
   assert(dragged.touches > initial.touches && dragged.moves > initial.moves, "touch drag produced events on the owned test pad");
   const scrollCenter = center(initial.scroll, display);
-  await actOwned({ type: "scroll", direction: "down", amount: 350, ...scrollCenter }, display);
+  await actOwned({ type: "scroll", direction: "down", amount: 3, ...scrollCenter }, display);
   assert((await probe()).scrollY > initial.scrollY, "scroll moved the owned scroll view downward");
   await saveShot("02-owned-probe-after.png");
   receipt.finalProbe = await probe();

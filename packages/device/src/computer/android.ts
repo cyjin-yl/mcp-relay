@@ -576,11 +576,13 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
           finalTouch = to;
           args = ["/system/bin/input", "swipe", String(from.x), String(from.y), String(to.x), String(to.y), String(Math.round(duration))];
         } else {
-          const amount = action.amount ?? 400;
-          if (!Number.isFinite(amount) || amount <= 0) throw new ComputerError("invalid_scroll", "Android scroll amount must be positive.");
+          const steps = action.amount === undefined ? 3 : action.amount;
+          if (!Number.isInteger(steps) || steps < 1 || steps > 40) {
+            throw new ComputerError("invalid_scroll", "Android scroll amount must be an integer from 1 to 40 steps.");
+          }
           const horizontal = action.direction === "left" || action.direction === "right";
           const axisSize = horizontal ? display.width : display.height;
-          const distance = Math.min(amount, axisSize * 0.75);
+          const distance = Math.min(steps * 120, axisSize * 0.75);
           let cx = action.x ?? display.width / 2, cy = action.y ?? display.height / 2;
           point(display, cx, cy);
           if (horizontal) cx = Math.min(display.width - 1 - distance / 2, Math.max(distance / 2, cx));

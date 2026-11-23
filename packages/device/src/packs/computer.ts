@@ -23,7 +23,7 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("drag"), fromX: coordinate, fromY: coordinate, toX: coordinate, toY: coordinate,
     durationMs: z.number().int().min(100).max(5000).optional() }).strict(),
   z.object({ type: z.literal("scroll"), direction: z.enum(["up", "down", "left", "right"]),
-    amount: z.number().int().min(1).max(40).optional(), x: coordinate.optional(), y: coordinate.optional() }).strict(),
+    amount: z.number().int().min(1).max(40).optional().describe("Number of scroll steps (1–40); defaults to 3."), x: coordinate.optional(), y: coordinate.optional() }).strict(),
   z.object({ type: z.literal("key"), keys: z.array(z.string().min(1).max(48)).min(1).max(8) }).strict(),
   z.object({ type: z.literal("text"), text: z.string().max(16384) }).strict()
 ]);
