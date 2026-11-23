@@ -24,6 +24,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_macos_event_diagnostic:
+        description: Run the preserved pre-fix macOS no-input event diagnostic (read-only)
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [feat/computer-use-20261123]
     paths:
@@ -69,6 +74,7 @@ jobs:
           INPUT_BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
           INPUT_HARNESS_URL: ${{ inputs.harness_url }}
           INPUT_HARNESS_SHA256: ${{ inputs.harness_sha256 }}
+          MCP_RELAY_SMOKE_POWERSHELL: ${{ matrix.powershell }}
         run: |
           node --input-type=module <<'NODE'
           import { createHash } from 'node:crypto';
@@ -123,7 +129,9 @@ jobs:
               }
             }
           }
-          const verified = {};
+          const ciValue = name => /^\d+$/.test(process.env[name] ?? '') ? process.env[name] : null;
+          const verified = { ciRunId: ciValue('GITHUB_RUN_ID'), ciRunAttempt: ciValue('GITHUB_RUN_ATTEMPT'),
+            platform: process.platform, powerShellSelector: process.env.MCP_RELAY_SMOKE_POWERSHELL || null };
           for (const [kind, filename] of [['bundle', 'cli.cjs'], ['harness', 'computer-native-smoke.cjs']]) {
             const sha = String(config[kind + '_sha256'] ?? '').toLowerCase();
             if (!/^[a-f0-9]{64}$/.test(sha)) throw new Error('Invalid SHA256: ' + kind);
@@ -212,7 +220,7 @@ jobs:
           if (result.status !== 0) throw new Error('Diagnostic exited ' + result.status + '; native UI acceptance still runs independently.');
           NODE
       - name: Diagnose macOS event bridge without posting input
-        if: matrix.os == 'macos-15'
+        if: github.event_name == 'workflow_dispatch' && inputs.run_macos_event_diagnostic && matrix.os == 'macos-15'
         timeout-minutes: 2
         continue-on-error: true
         shell: bash
@@ -302,6 +310,11 @@ jobs:
           const receipt = JSON.parse(readFileSync(join(evidence, 'acceptance.json'), 'utf8'));
           const provenance = JSON.parse(readFileSync(join(root, 'artifact-provenance.json'), 'utf8'));
           assert.equal(receipt.bundleSha256, provenance.bundle.sha256);
+          assert.equal(receipt.harnessSha256, provenance.harness.sha256);
+          assert.equal(receipt.ciRunId, provenance.ciRunId); assert.equal(receipt.ciRunAttempt, provenance.ciRunAttempt);
+          assert.equal(provenance.ciRunId, process.env.GITHUB_RUN_ID); assert.equal(provenance.ciRunAttempt, process.env.GITHUB_RUN_ATTEMPT);
+          assert.equal(provenance.platform, process.platform);
+          assert.equal(provenance.powerShellSelector, process.env.MCP_RELAY_SMOKE_POWERSHELL || null);
           assert.equal(receipt.platform, process.platform);
           const title = process.platform === 'win32' ? 'Windows' : 'macOS';
           if (result.status === 77 && receipt.status === 'blocked') {

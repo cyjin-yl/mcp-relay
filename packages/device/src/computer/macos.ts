@@ -91,14 +91,21 @@ function requireInput(ignoreHeld) {
  }
  return state;
 }
-function releaseEvent(event) { if(event)$.CFRelease(event); }
+// Explicit CFRelease through JXA crashes inside the bridge on supported macOS
+// runtimes (native no-post probes: SIGSEGV/SIGBUS at the release call). Do not
+// assume a GC/ownership cause. Retain these finite objects until this invocation's
+// dedicated osascript exits; runNative waits for that real exit before releasing
+// the operation lane. The bounded actions allocate at most 1,334 CGEvents here.
+// This memory lifetime is separate from the mandatory key-up/button-up events.
+var helperEvents=[];
+function retainUntilHelperExit(event) { if(event)helperEvents.push(event); }
 function post(event) { if(!event)fail('INPUT_EVENT_FAILED','CoreGraphics could not create an input event.');$.CGEventPost(0,event); }
 function mouse(type,x,y,button,count) {
  var event=$.CGEventCreateMouseEvent(null,type,{x:x,y:y},button);
- try {if(count!==undefined)$.CGEventSetIntegerValueField(event,1,count);post(event);}finally{releaseEvent(event);}
+ try {if(count!==undefined)$.CGEventSetIntegerValueField(event,1,count);post(event);}finally{retainUntilHelperExit(event);}
 }
 function location() {
- var event=$.CGEventCreate(null);try{return $.CGEventGetLocation(event);}finally{releaseEvent(event);}
+ var event=$.CGEventCreate(null);try{return $.CGEventGetLocation(event);}finally{retainUntilHelperExit(event);}
 }
 function move(x,y,dragged) {
  mouse(dragged?6:5,x,y,0);
@@ -111,7 +118,7 @@ function buttonInfo(name) {
 }
 function keyboard(code,down,flags) {
  var event=$.CGEventCreateKeyboardEvent(null,code,down);
- try {if([54,55,56,58,59,60,61,62].indexOf(code)>=0)$.CGEventSetType(event,12);$.CGEventSetFlags(event,flags||0);post(event);}finally{releaseEvent(event);}
+ try {if([54,55,56,58,59,60,61,62].indexOf(code)>=0)$.CGEventSetType(event,12);$.CGEventSetFlags(event,flags||0);post(event);}finally{retainUntilHelperExit(event);}
 }
 function unicode(text) {
  if(!hasUnicode)fail('UNICODE_TEXT_UNAVAILABLE','The native Unicode keyboard bridge is unavailable on this macOS runtime.');
@@ -126,7 +133,7 @@ function unicode(text) {
    $.CGEventKeyboardSetUnicodeString(down,piece.length,data.bytes);
    $.CGEventKeyboardSetUnicodeString(up,piece.length,data.bytes);
    post(down);post(up);
-  }finally{releaseEvent(down);releaseEvent(up);}
+  }finally{retainUntilHelperExit(down);retainUntilHelperExit(up);}
   start=end;
  }
 }
@@ -152,7 +159,7 @@ function action(request) {
   if(!vertical&&request.direction!=='left'&&request.direction!=='right')fail('INVALID_ACTION','Unsupported scroll direction.');
   for(var left=request.amount;left>0;left-=10){
    var amount=Math.min(left,10)*sign,event=$.CGEventCreateScrollWheelEvent(null,1,2,vertical?amount:0,vertical?0:amount);
-   try{post(event);}finally{releaseEvent(event);}
+   try{post(event);}finally{retainUntilHelperExit(event);}
   }
  }else if(request.op==='key'){
   var pressed=[];

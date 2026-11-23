@@ -136,7 +136,11 @@ async function main(): Promise<void> {
     catch (error) { cases.push({ name, passed: false, error: String(error) }); throw error; }
   };
   const report: Record<string, unknown> = { platform: process.platform, node: process.version, evidence, cases,
-    bundleSha256: createHash("sha256").update(readFileSync(bundle)).digest("hex"), startedAt: new Date().toISOString(), passed: false };
+    bundleSha256: createHash("sha256").update(readFileSync(bundle)).digest("hex"),
+    harnessSha256: createHash("sha256").update(readFileSync(resolve(process.argv[1]))).digest("hex"),
+    ciRunId: /^\d+$/.test(process.env.GITHUB_RUN_ID ?? "") ? process.env.GITHUB_RUN_ID : null,
+    ciRunAttempt: /^\d+$/.test(process.env.GITHUB_RUN_ATTEMPT ?? "") ? process.env.GITHUB_RUN_ATTEMPT : null,
+    startedAt: new Date().toISOString(), passed: false };
   let worker: ChildProcess | undefined, socket: WebSocket | undefined, fixture: ReturnType<typeof startNativeFixture> | undefined;
   let observer: NativeRuntimeObserver | undefined;
   let log = "";
