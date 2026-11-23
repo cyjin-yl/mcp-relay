@@ -1,0 +1,15 @@
+[Unit]
+Description=My Devices relay for doesvm with verified online updates
+
+[Service]
+Type=simple
+WorkingDirectory=/tank/shared/projects/opengreendam
+EnvironmentFile=-%h/.mcp-relay/doesvm-service.env
+ExecStart=/usr/bin/node %h/.local/share/mcp-relay/launcher.cjs connect --root /tank/shared/projects --config %h/.mcp-relay/doesvm.json --name doesvm --packs minimal,omp,kernel --allow-kernel --update-manifest https://relay.cyjin.dev/updates/device/stable.json --update-interval 300
+Restart=always
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target
