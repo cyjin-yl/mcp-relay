@@ -187,7 +187,7 @@ async function main(): Promise<void> {
     if (!fixture) return undefined;
     try { return JSON.parse(readFileSync(fixture.statePath, "utf8")) as FixtureState; } catch { return undefined; }
   }
-  async function focused(): Promise<FixtureState> {
+  async function focused(timeoutMs = 10000): Promise<FixtureState> {
     let accepted: FixtureState | undefined;
     await until(() => {
       const child = fixture?.child;
@@ -196,7 +196,7 @@ async function main(): Promise<void> {
       const candidate = fixtureState();
       if (candidate?.foreground !== true) return false;
       assert.equal(candidate.title, fixture!.title); accepted = candidate; return true;
-    }, 10000, "owned fixture focus");
+    }, timeoutMs, "owned fixture focus");
     assert(accepted); return accepted;
   }
   let frameNumber = 0;
@@ -312,7 +312,9 @@ async function main(): Promise<void> {
     if (info.available && !captureDenied) {
       fixture = startNativeFixture(process.platform, evidence);
       fixture.child.once("error", error => { log += "\nfixture: " + String(error); });
-      await focused();
+      // Initial framework/Add-Type startup has its own finite budget. Every
+      // subsequent action still requires the normal fresh 10-second focus gate.
+      await focused(20000);
       info = data(await call("computer_info", {})) as unknown as ComputerState & { enabled: boolean };
       report.capabilities = info;
       captureDenied = isCaptureDenied(info);

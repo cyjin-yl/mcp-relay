@@ -11,6 +11,7 @@ export type FixtureState = {
 
 const WINDOWS_FIXTURE = String.raw`$ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
+[Console]::Error.WriteLine('fixture-stage: script-start')
 $settings=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__FIXTURE__'))|ConvertFrom-Json
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -80,18 +81,16 @@ $timer.Add_Tick({
  $record=@{title=$form.Text;foreground=($visible -and (-not $minimized) -and $owned -and $foregroundMatches);visible=$visible;minimized=$minimized;foregroundHandleMatches=$foregroundMatches;targetsOwned=$owned;
  pointer=@{x=[Windows.Forms.Cursor]::Position.X;y=[Windows.Forms.Cursor]::Position.Y};text=$text.Text;clickCount=$script:clicks;dragCount=$script:drags;scrollCount=$script:scrolls;moveCount=$script:moves;dragging=$script:dragging;
  regions=$regions}
- # Publish one complete same-directory snapshot; readers never see truncation.
- $pendingState=$settings.state+'.writing'
- [IO.File]::WriteAllText($pendingState,($record|ConvertTo-Json -Depth 8 -Compress),(New-Object Text.UTF8Encoding($false)))
- if([IO.File]::Exists($settings.state)){[IO.File]::Replace($pendingState,$settings.state,$null)}
- else{[IO.File]::Move($pendingState,$settings.state)}
+ [IO.File]::WriteAllText($settings.state,($record|ConvertTo-Json -Depth 8 -Compress),(New-Object Text.UTF8Encoding($false)))
 })
 $form.Add_Shown({
+ [Console]::Error.WriteLine('fixture-stage: window-shown')
  [RelaySmokeWindow]::ShowWindow($form.Handle,5)|Out-Null
  $form.BringToFront()
  [RelaySmokeWindow]::SetForegroundWindow($form.Handle)|Out-Null
  $form.Activate();$form.Refresh();$text.Focus()|Out-Null;$timer.Start()
 })
+[Console]::Error.WriteLine('fixture-stage: form-ready')
 try{[Windows.Forms.Application]::Run($form)}finally{$timer.Stop();$timer.Dispose();$form.Dispose()}
 `;
 
@@ -126,6 +125,20 @@ var app=$.NSApplication.sharedApplication;
 stage('application-ready');
 app.setActivationPolicy(0);
 stage('activation-policy-ready');
+// Command key equivalents use AppKit's normal menu/responder-chain routing.
+// The fixture has no nib, so install the standard Edit > Select All item.
+var menuBar=$.NSMenu.alloc.initWithTitle('Main');
+var applicationItem=$.NSMenuItem.alloc.init;
+applicationItem.submenu=$.NSMenu.alloc.initWithTitle('Relay Smoke');
+menuBar.addItem(applicationItem);
+var editItem=$.NSMenuItem.alloc.init;
+editItem.title='Edit';
+var editMenu=$.NSMenu.alloc.initWithTitle('Edit');
+var selectAllItem=$.NSMenuItem.alloc.initWithTitleActionKeyEquivalent('Select All','selectAll:','a');
+selectAllItem.keyEquivalentModifierMask=0x100000;
+editMenu.addItem(selectAllItem);editItem.submenu=editMenu;menuBar.addItem(editItem);
+app.mainMenu=menuBar;
+stage('main-menu-ready');
 var main=$.NSScreen.screens.objectAtIndex(0).frame;
 stage('window-create');
 var window=$.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer($.NSMakeRect(main.origin.x+80,main.origin.y+80,640,440),15,2,false);
