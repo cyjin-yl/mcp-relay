@@ -30,7 +30,7 @@ on:
         type: boolean
         default: false
   push:
-    branches: [feat/computer-use-20261123]
+    branches: [feat/computer-use-20261123, feat/pve-computer-use-0.1.9]
     paths:
       - .github/workflows/computer-native-smoke.yml
       - .github/computer-native-candidate.json

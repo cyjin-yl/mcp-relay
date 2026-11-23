@@ -160,11 +160,13 @@ or persistent kernel state prevents a safe switch. Use `update-check` to request
 check and `update-status` to observe it; do not repeatedly issue feature enablement
 or reload commands.
 
-For doesvm's legacy worker, retain the existing migration waiter and its protected
-PID/start-time identities. Do not reset its kernel, signal the worker, start a
-second worker with the same config, or replace the launch path just to make the
-version number advance. Stage/defer is a valid rollout state until the protected
-work naturally finishes.
+The live doesvm observation at 2026-11-23 21:08 UTC found a managed 0.1.7
+launcher/supervisor/worker with an active persistent kernel. Its existing computer
+setting was enabled and not paused. Use the normal update check and preserve that
+process chain while its session is active; stage/defer is a valid rollout state.
+Do not infer completion from an old migration-waiter document or from the version
+of a separately tested CLI. A legacy worker on another device still needs its
+existing identity-bound migration waiter until its protected work finishes.
 
 After any device upgrade, require both worker and supervisor version `0.1.9`, the
 expected digest, a fresh registered generation, and a real tool callback from that
