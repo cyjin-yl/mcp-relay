@@ -73,3 +73,34 @@ it("finds Android bash in the Termux prefix without LD_PRELOAD path rewriting", 
     expect(result.stderr).toBe("");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+it("keeps execution pending when a descendant outside the process group retains an output pipe", async () => {
+  const root = mkdtempSync(join(tmpdir(), "relay-inherited-pipe-"));
+  const ready = join(root, "ready");
+  const release = join(root, "release");
+  const controller = new AbortController();
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+  // A separate session models a descendant that the original group's signal
+  // cannot stop. No sudo, root account or system-wide process is involved.
+  const descendant = `const fs=require('node:fs'); const until=Date.now()+3000; const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)})||Date.now()>until){clearInterval(timer);process.exit(0);}},10);`;
+  const parent = `const cp=require('node:child_process'); const fs=require('node:fs'); const child=cp.spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{detached:true,stdio:['ignore',1,2]}); child.once('spawn',()=>fs.writeFileSync(${JSON.stringify(ready)},'ready')); child.unref(); setInterval(()=>{},1000);`;
+  const running = runShell(root, `${quote(process.execPath)} -e ${quote(parent)}`, undefined, 5000, controller.signal);
+  let settled = false;
+  void running.then(() => { settled = true; });
+  try {
+    for (let count = 0; count < 1000 && !existsSync(ready); count++) await delay(5);
+    expect(existsSync(ready)).toBe(true);
+    controller.abort();
+    await delay(50);
+    // The direct command was killed, but the inherited pipe is still open.
+    // Resolving here would let the scheduler overlap another mutation.
+    expect(settled).toBe(false);
+    writeFileSync(release, "finish");
+    expect((await running).timedOut).toBe(true);
+  } finally {
+    controller.abort();
+    writeFileSync(release, "finish");
+    await running.catch(() => undefined);
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 10000);
