@@ -4,14 +4,14 @@
  * Exit 77 means a verified OS/session/permission blocker, never a desktop pass.
  */
 import assert from "node:assert/strict";
-import { fork, type ChildProcess } from "node:child_process";
+import { fork, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { WebSocketServer, type WebSocket } from "ws";
-import { pngDimensions } from "../../src/computer/native.js";
+import { findExecutable, pngDimensions, runNative } from "../../src/computer/native.js";
 import type { ComputerAction, ComputerDisplay, ComputerState } from "../../src/computer/types.js";
 import { startNativeFixture, type FixtureState } from "./computer-native-fixtures.js";
 
@@ -29,12 +29,63 @@ function data(result: Result): Record<string, unknown> {
   const part = result.content?.find(item => item.type === "text" && item.text);
   return JSON.parse(part?.text ?? "{}") as Record<string, unknown>;
 }
+type NativeRuntimeObserver = { child: ChildProcess; readyPath: string; proofPath: string; log(): string };
+function observeWorkerPowerShell(workerPid: number, evidence: string): NativeRuntimeObserver {
+  const readyPath = join(evidence, "runtime-observer-ready"), proofPath = join(evidence, "native-runtime-observed.json");
+  const settings = Buffer.from(JSON.stringify({ workerPid, readyPath, proofPath })).toString("base64");
+  const runtime = findExecutable([win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), "powershell.exe"]);
+  assert(runtime, "System PowerShell is required for the test's read-only process observer.");
+  const script = "$ErrorActionPreference='Stop'\n" +
+    "$settings=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + settings + "'))|ConvertFrom-Json\n" +
+    "$utf8=New-Object Text.UTF8Encoding($false)\n" +
+    "$filter='ParentProcessId = '+[int]$settings.workerPid\n" +
+    "Get-CimInstance Win32_Process -Filter $filter|Out-Null\n" +
+    "[IO.File]::WriteAllText($settings.readyPath,'ready',$utf8)\n" +
+    "$deadline=[DateTime]::UtcNow.AddSeconds(30)\n" +
+    "while([DateTime]::UtcNow -lt $deadline){\n" +
+    " foreach($entry in @(Get-CimInstance Win32_Process -Filter $filter)){\n" +
+    "  if($entry.Name -match '^(pwsh|powershell)\\.exe$' -and $entry.ExecutablePath){\n" +
+    "   $proof=@{pid=[int]$entry.ProcessId;parentPid=[int]$entry.ParentProcessId;executable=[string]$entry.ExecutablePath;observedAt=[DateTime]::UtcNow.ToString('o')}\n" +
+    "   $proofTemp=$settings.proofPath+\'.writing\'\n" +
+    "   [IO.File]::WriteAllText($proofTemp,($proof|ConvertTo-Json -Compress),$utf8)\n" +
+    "   [IO.File]::Move($proofTemp,$settings.proofPath)\n" +
+    "   exit 0\n" +
+    "  }\n" +
+    " }\n" +
+    " Start-Sleep -Milliseconds 150\n" +
+    "}\n" +
+    "throw 'No native PowerShell child of the owned relay worker was observed.'\n";
+  const child = spawn(runtime, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+    { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  let log = "";
+  child.stdout!.on("data", value => { log = (log + value.toString()).slice(-8000); });
+  child.stderr!.on("data", value => { log = (log + value.toString()).slice(-8000); });
+  child.on("error", error => { log += String(error); });
+  return { child, readyPath, proofPath, log: () => log };
+}
+function fixtureWorkerEnvironment(powerShell: string): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = { ...process.env, MCP_RELAY_WORKER: "1", MCP_RELAY_SUPERVISOR: "0",
+    MCP_RELAY_LAUNCHED: "0", MCP_RELAY_START_DRAINED: "0" };
+  if (process.platform === "win32" && powerShell === "5.1") {
+    // Only this synthetic worker's environment changes. Production discovery
+    // chooses its real system fallback; there is no backend override.
+    for (const key of Object.keys(result)) {
+      if (["programfiles", "programw6432"].includes(key.toLowerCase())) delete result[key];
+      if (key.toLowerCase() === "path") result[key] = (result[key] ?? "").split(";")
+        .filter(directory => !existsSync(win32.join(directory.replace(/^"|"$/g, ""), "pwsh.exe"))).join(";");
+    }
+  }
+  return result;
+}
+
 async function main(): Promise<void> {
   assert(["win32", "darwin"].includes(process.platform), "Run this prebuilt harness on Windows or macOS.");
   const bundle = resolve(process.argv[2] ?? "");
   const evidence = process.argv[3] ? resolve(process.argv[3]) : mkdtempSync(join(tmpdir(), "relay-computer-native-"));
   mkdirSync(evidence, { recursive: true });
   const root = join(evidence, "fixture workspace 中文"); mkdirSync(root, { recursive: true });
+  const powerShell = process.env.MCP_RELAY_SMOKE_POWERSHELL || "automatic";
+  assert(["automatic", "7", "5.1"].includes(powerShell), "Unsupported smoke PowerShell selector");
   const cases: Array<{ name: string; passed: boolean; error?: string }> = [];
   const check = async (name: string, work: () => Promise<void>) => {
     try { await work(); cases.push({ name, passed: true }); }
@@ -43,6 +94,7 @@ async function main(): Promise<void> {
   const report: Record<string, unknown> = { platform: process.platform, node: process.version, evidence, cases,
     bundleSha256: createHash("sha256").update(readFileSync(bundle)).digest("hex"), startedAt: new Date().toISOString(), passed: false };
   let worker: ChildProcess | undefined, socket: WebSocket | undefined, fixture: ReturnType<typeof startNativeFixture> | undefined;
+  let observer: NativeRuntimeObserver | undefined;
   let log = "";
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise<void>(done => server.once("listening", done));
@@ -122,7 +174,7 @@ async function main(): Promise<void> {
     worker = fork(bundle, ["connect", "--root", root, "--config", config, "--url", url,
       "--packs", "minimal,computer", "--allow-computer", "--no-auto-update"], {
       execArgv: [], windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
-      env: { ...process.env, MCP_RELAY_WORKER: "1", MCP_RELAY_SUPERVISOR: "0", MCP_RELAY_LAUNCHED: "0", MCP_RELAY_START_DRAINED: "0" }
+      env: fixtureWorkerEnvironment(powerShell)
     });
     worker.stdout!.on("data", chunk => { log = (log + chunk.toString()).slice(-64000); });
     worker.stderr!.on("data", chunk => { log = (log + chunk.toString()).slice(-64000); });
@@ -130,7 +182,36 @@ async function main(): Promise<void> {
     const timer = setTimeout(() => registration.reject(new Error("CLI did not register")), 20000);
     let hello: Wire; try { hello = await registration.promise; } finally { clearTimeout(timer); }
     report.deviceVersion = hello.device?.version;
+    if (process.platform === "win32") {
+      assert(worker.pid);
+      observer = observeWorkerPowerShell(worker.pid, evidence);
+      await until(() => existsSync(observer!.readyPath), 10000, "native runtime observer ready");
+    }
     const infoResult = await call("computer_info", {});
+    if (observer) {
+      await check("observed native worker PowerShell runtime " + powerShell, async () => {
+        await until(() => existsSync(observer!.proofPath), 5000, "actual worker native executable observation");
+        const actual = JSON.parse(readFileSync(observer!.proofPath, "utf8")) as { pid: number; parentPid: number; executable: string; observedAt: string };
+        assert.equal(actual.parentPid, worker!.pid);
+        assert(win32.isAbsolute(actual.executable));
+        const versionScript = "[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false);@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;pshome=$PSHOME}|ConvertTo-Json -Compress";
+        const queried = await runNative({ command: actual.executable, args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", versionScript], maxOutputBytes: 16384 }, { timeoutMs: 8000 });
+        assert.equal(queried.exitCode, 0);
+        const version = JSON.parse(queried.stdout.toString("utf8").replace(/^\uFEFF/, "").trim()) as { version: string; edition: string; pshome: string };
+        report.nativeRuntime = { requested: powerShell, ...actual, ...version };
+        if (powerShell === "5.1") {
+          assert.match(actual.executable, /\\powershell\.exe$/i);
+          assert.match(version.version, /^5\.1\./);
+          assert.equal(version.edition, "Desktop");
+        } else if (powerShell === "7") {
+          assert.match(actual.executable, /\\pwsh\.exe$/i);
+          assert.match(version.version, /^7\./);
+          assert.equal(version.edition, "Core");
+        } else {
+          assert.match(version.version, /^(5\.1|7)\./);
+        }
+      });
+    }
     assert.notEqual(infoResult.isError, true, JSON.stringify(data(infoResult)));
     let info = data(infoResult) as unknown as ComputerState & { enabled: boolean };
     report.capabilities = info;
@@ -234,6 +315,10 @@ async function main(): Promise<void> {
       catch { report.workerCleanupPending = true; worker.kill("SIGTERM"); }
     }
     await fixture?.stop();
+    if (observer) {
+      if (observer.child.exitCode === null && observer.child.signalCode === null) observer.child.kill("SIGTERM");
+      report.runtimeObserverLog = observer.log();
+    }
     for (const waiter of pending.values()) { clearTimeout(waiter.timer); waiter.fail(new Error("Harness closed")); }
     pending.clear();
     for (const client of server.clients) client.terminate();

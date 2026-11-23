@@ -1,6 +1,6 @@
 {
-  "bundle_url": "https://relay.cyjin.dev/updates/device/candidates/43a193d324a9aabacc8b4908ef5946db5b39401acc8fd3381a13b908bf694c33/cli.cjs",
-  "bundle_sha256": "43a193d324a9aabacc8b4908ef5946db5b39401acc8fd3381a13b908bf694c33",
-  "harness_url": "https://relay.cyjin.dev/updates/device/candidates/43a193d324a9aabacc8b4908ef5946db5b39401acc8fd3381a13b908bf694c33/computer-native-smoke.cjs",
-  "harness_sha256": "285a3a699446667cf09665a8d735d34d8e71789969b1206e46404a33ff575428"
+  "bundle_url": "https://relay.cyjin.dev/updates/device/candidates/a4b45084441464109eca15f1ca41394944b5cae9dcd57def2a2e4a5d6551123c/cli.cjs",
+  "bundle_sha256": "a4b45084441464109eca15f1ca41394944b5cae9dcd57def2a2e4a5d6551123c",
+  "harness_url": "https://relay.cyjin.dev/updates/device/candidates/a4b45084441464109eca15f1ca41394944b5cae9dcd57def2a2e4a5d6551123c/computer-native-smoke-f6cea86664df21efcff6f66d6913d8f93111b12a44f8ab7b8bf858c06b9b37b8.cjs",
+  "harness_sha256": "f6cea86664df21efcff6f66d6913d8f93111b12a44f8ab7b8bf858c06b9b37b8"
 }

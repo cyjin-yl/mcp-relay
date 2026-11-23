@@ -34,11 +34,20 @@ concurrency:
 
 jobs:
   native:
-    name: Native UI / ${{ matrix.os }}
+    name: Native UI / ${{ matrix.os }} / ${{ matrix.runtime }}
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-15]
+        include:
+          - os: windows-latest
+            runtime: pwsh7
+            powershell: '7'
+          - os: windows-latest
+            runtime: powershell51
+            powershell: '5.1'
+          - os: macos-15
+            runtime: system
+            powershell: ''
     runs-on: ${{ matrix.os }}
     timeout-minutes: 12
     steps:
@@ -96,6 +105,8 @@ jobs:
           NODE
       - name: Run actual CLI against owned native test window
         shell: bash
+        env:
+          MCP_RELAY_SMOKE_POWERSHELL: ${{ matrix.powershell }}
         run: |
           node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
@@ -135,7 +146,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: native-computer-${{ matrix.os }}
+          name: native-computer-${{ matrix.os }}-${{ matrix.runtime }}
           path: ${{ runner.temp }}/relay-computer-native/
           if-no-files-found: error
           retention-days: 14
