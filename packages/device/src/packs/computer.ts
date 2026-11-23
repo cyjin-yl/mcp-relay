@@ -279,7 +279,9 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
         }
       } catch (error) {
         const result = errorResult(error, { ...(requestId ? { request_id: requestId, action: actionType } : {}),
-          mayHaveApplied: attempted, requires_new_frame: attempted });
+          // Setup can mutate even though no computer_action was attempted.
+          mayHaveApplied: attempted || (error instanceof ComputerError && error.details?.mayHaveApplied === true),
+          requires_new_frame: attempted });
         if (attempted && requestId && fingerprint) remember(requestId, fingerprint, result);
         return result;
       } finally {

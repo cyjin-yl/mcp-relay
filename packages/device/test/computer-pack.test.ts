@@ -14,11 +14,12 @@ function fixture() {
     inputKind: "mouse_keyboard", displays: [display], actions: ["click", "move", "drag", "scroll", "key", "text"],
     unicodeText: true, permissions: { input: "granted" }, app: { id: "test-app" } };
   const act = vi.fn(async () => ({ submitted: true, verified: false }));
+  const setup = vi.fn(async () => ({ installed: true, changed: false }));
   const inspect = vi.fn(async () => state);
   const screenshot = vi.fn(async () => ({ data: png, mimeType: "image/png" as const,
     display: { ...display }, capturedAt: time, app: { id: "test-app" } }));
   const release = vi.fn(async () => {});
-  const backend: ComputerBackend = { id: "test", inspect, screenshot, act };
+  const backend: ComputerBackend = { id: "test", inspect, screenshot, act, setup };
   const pack = createComputerPack({ configPath: "/unused", backend, now: () => time,
     settings: () => settings, saveSettings: change => (settings = { ...settings, ...change }),
     lock: async () => release });
@@ -27,7 +28,7 @@ function fixture() {
     expect(result.isError).not.toBe(true);
     return (result.structuredContent as { frame_id: string }).frame_id;
   }
-  return { pack, state, display, act, inspect, screenshot, release, frame,
+  return { pack, state, display, act, setup, inspect, screenshot, release, frame,
     advance: (ms: number) => { time += ms; }, setSettings: (s: Partial<ComputerSettings>) => { settings = { ...settings, ...s }; } };
 }
 function data(result: { structuredContent?: unknown }): Record<string, unknown> {
@@ -137,5 +138,43 @@ describe("computer pack observation and action contract", () => {
     for (const tool of f.pack.tools) {
       expect(tool.annotations?.readOnlyHint).toBe(["computer_info", "computer_screenshot"].includes(tool.name));
     }
+  });
+});
+
+describe("computer setup uncertainty", () => {
+  it("retains backend mutation uncertainty and invalidates old frames", async () => {
+    const f = fixture(), frame_id = await f.frame();
+    f.setup.mockRejectedValue(new ComputerError("android_command_failed", "Installation failed",
+      { exitCode: 255, phase: "install", mayHaveApplied: true }));
+    const result = await f.pack.call("computer_setup", {}, ctx);
+    expect(result.isError).toBe(true);
+    expect(data(result)).toMatchObject({ code: "android_command_failed", exitCode: 255,
+      phase: "install", mayHaveApplied: true });
+    expect(f.setup).toHaveBeenCalledTimes(1);
+    const stale = await f.pack.call("computer_action", {
+      frame_id, request_id: "after-setup", action: { type: "key", keys: ["Tab"] }
+    }, ctx);
+    expect(data(stale).code).toBe("stale_frame");
+    expect(f.act).not.toHaveBeenCalled();
+    expect(f.release).toHaveBeenCalled();
+  });
+  it("retains a preflight guarantee that no mutation was attempted", async () => {
+    const f = fixture();
+    f.setup.mockRejectedValue(new ComputerError("android_command_failed", "Preflight failed",
+      { exitCode: 255, phase: "preflight", mayHaveApplied: false }));
+    const result = await f.pack.call("computer_setup", {}, ctx);
+    expect(data(result)).toMatchObject({ code: "android_command_failed",
+      phase: "preflight", mayHaveApplied: false });
+    expect(f.setup).toHaveBeenCalledTimes(1);
+    expect(f.act).not.toHaveBeenCalled();
+  });
+  it("keeps attempted action cancellation conservative and cached", async () => {
+    const f = fixture(), frame_id = await f.frame();
+    f.act.mockRejectedValue(new ComputerError("cancelled", "Cancelled before native spawn", { mayHaveApplied: false }));
+    const input = { frame_id, request_id: "cancel-before-spawn", action: { type: "key", keys: ["Tab"] } };
+    const result = await f.pack.call("computer_action", input, ctx);
+    expect(data(result)).toMatchObject({ code: "cancelled", mayHaveApplied: true, requires_new_frame: true });
+    expect(data(await f.pack.call("computer_action", input, ctx))).toMatchObject(data(result));
+    expect(f.act).toHaveBeenCalledTimes(1);
   });
 });

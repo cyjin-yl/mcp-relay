@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  ANDROID_INPUT_METHOD, createAndroidBackend, parseAndroidGeometry, parseAndroidApp, parseAndroidLock, androidKeyCode
+  ANDROID_INPUT_METHOD, createAndroidBackend, parseAndroidGeometry, parseAndroidApp, parseAndroidLock, androidKeyCode, parseAndroidInstallFailure
 } from "../src/computer/android.js";
 import { ComputerError, type NativeCommand, type NativeContext, type NativeResult } from "../src/computer/types.js";
 
@@ -37,9 +37,11 @@ function requestId(spec: NativeCommand): string {
 function fixture(options: {
   installed?: boolean; combo?: boolean; real?: string; rotation?: number; policy?: string; power?: string;
   act?: (spec: NativeCommand, index: number) => Promise<NativeResult> | NativeResult;
+  probe?: (spec: NativeCommand, index: number) => Promise<NativeResult> | NativeResult;
+  install?: (spec: NativeCommand) => Promise<NativeResult> | NativeResult;
 } = {}) {
   const calls: NativeCommand[] = [];
-  let installed = options.installed ?? true, clock = 0, actionIndex = 0;
+  let installed = options.installed ?? true, clock = 0, actionIndex = 0, probeIndex = 0;
   const waits: number[] = [];
   const backend = createAndroidBackend({
     find: () => "/system/xbin/su", bridge, now: () => clock,
@@ -47,11 +49,13 @@ function fixture(options: {
     run: async spec => {
       calls.push(spec);
       if (typeof spec.input === "string" && spec.input.includes("__RELAY_ANDROID_uid__")) {
+        if (options.probe) return options.probe(spec, probeIndex++);
         return ok(probe(installed, options.combo, options.real, options.rotation, undefined, options.policy, options.power));
       }
       if (spec.args[1]?.includes("/system/bin/screencap -p")) return { stdout: png(), stderr: Buffer.alloc(0), exitCode: 0 };
       if (Buffer.isBuffer(spec.input)) {
         expect(spec.input.equals(artifact)).toBe(true);
+        if (options.install) return options.install(spec);
         installed = true;
         return ok("Success\n");
       }
@@ -194,5 +198,95 @@ describe("Android computer backend", () => {
     await expect(test.backend.act({ type: "move", x: 5, y: 5 }, display, context)).rejects.toMatchObject({ code: "unsupported_action" });
     await expect(test.backend.act({ type: "click", button: "right", x: 5, y: 5 }, display, context)).rejects.toMatchObject({ code: "unsupported_button" });
     await expect(test.backend.act({ type: "drag", fromX: 1, fromY: 1, toX: 2, toY: 2, durationMs: 6000 }, display, context)).rejects.toMatchObject({ code: "invalid_duration" });
+  });
+});
+
+describe("Android setup failure boundaries", () => {
+  it("labels failed preflight without exposing native output or attempting install", async () => {
+    const test = fixture({ installed: false, probe: () => ({
+      ...ok("private-native-stdout", 255), stderr: Buffer.from("java.lang.SecurityException: private-native-stderr")
+    }) });
+    const error = await test.backend.setup!(context).catch(error => error);
+    expect(error).toMatchObject({ code: "android_command_failed",
+      details: { exitCode: 255, phase: "preflight", mayHaveApplied: false } });
+    expect(JSON.stringify({ message: error.message, details: error.details })).not.toContain("private-native");
+    expect(error.details).not.toHaveProperty("packageManagerCategory");
+    expect(test.calls).toHaveLength(1);
+    expect(test.calls.some(call => Buffer.isBuffer(call.input))).toBe(false);
+  });
+  it("retains an explicit cancellation before the installer starts", async () => {
+    const controller = new AbortController();
+    const test = fixture({ installed: false, probe: () => {
+      controller.abort();
+      return ok(probe(false));
+    } });
+    await expect(test.backend.setup!({ ...context, signal: controller.signal })).rejects.toMatchObject({
+      code: "cancelled", details: { phase: "install", mayHaveApplied: false }
+    });
+    expect(test.calls).toHaveLength(1);
+    expect(test.calls.some(call => Buffer.isBuffer(call.input))).toBe(false);
+  });
+  it("keeps installation uncertainty and safe package code without retrying", async () => {
+    const test = fixture({ installed: false, install: () => ({
+      ...ok("Failure [INSTALL_FAILED_USER_RESTRICTED: private-install-stdout]", 255),
+      stderr: Buffer.from("private-install-stderr")
+    }) });
+    const error = await test.backend.setup!(context).catch(error => error);
+    expect(error).toMatchObject({ code: "android_command_failed", details: {
+      exitCode: 255, phase: "install", mayHaveApplied: true, packageManagerCode: "INSTALL_FAILED_USER_RESTRICTED"
+    } });
+    expect(JSON.stringify({ message: error.message, details: error.details })).not.toContain("private-install");
+    expect(test.calls).toHaveLength(2);
+    expect(test.calls.filter(call => Buffer.isBuffer(call.input))).toHaveLength(1);
+    expect(test.waits.reduce((sum, ms) => sum + ms, 0)).toBeGreaterThanOrEqual(16000);
+  });
+  it("keeps a successful install uncertain when its read-only verification fails", async () => {
+    const test = fixture({ installed: false, probe: (_spec, index) =>
+      index === 0 ? ok(probe(false)) : ok("", 255) });
+    await expect(test.backend.setup!(context)).rejects.toMatchObject({ code: "android_command_failed",
+      details: { exitCode: 255, phase: "verification", mayHaveApplied: true } });
+    expect(test.calls).toHaveLength(3);
+    expect(test.calls.filter(call => Buffer.isBuffer(call.input))).toHaveLength(1);
+  });
+  it("labels an installed APK hash mismatch as verification uncertainty", async () => {
+    const test = fixture({ installed: false, probe: () => ok(probe(false)) });
+    await expect(test.backend.setup!(context)).rejects.toMatchObject({
+      code: "android_bridge_install_unconfirmed", details: { phase: "verification", mayHaveApplied: true }
+    });
+    expect(test.calls.filter(call => Buffer.isBuffer(call.input))).toHaveLength(1);
+  });
+  it("sanitizes unexpected verification errors after installation", async () => {
+    const test = fixture({ installed: false, probe: (_spec, index) => {
+      if (index === 0) return ok(probe(false));
+      throw new Error("private-verification-input");
+    } });
+    const error = await test.backend.setup!(context).catch(error => error);
+    expect(error).toMatchObject({ code: "android_setup_failed",
+      details: { phase: "verification", mayHaveApplied: true } });
+    expect(error.message).not.toContain("private-verification-input");
+    expect(test.calls.filter(call => Buffer.isBuffer(call.input))).toHaveLength(1);
+  });
+});
+
+describe("Android install failure diagnostics", () => {
+  it.each(["INSTALL_FAILED_USER_RESTRICTED", "INSTALL_PARSE_FAILED_BAD_MANIFEST"])(
+    "returns only the bounded package-manager code %s", code => {
+      expect(parseAndroidInstallFailure("Failure [" + code + ": /private/app.apk]", "private user input"))
+        .toEqual({ packageManagerCode: code });
+    });
+  it.each([
+    ["java.lang.SecurityException: /private/app.apk", "package_manager_security_exception"],
+    ["Error: Unknown option --private-value", "unsupported_install_option"],
+    ["cmd: Can't find service: package", "package_service_unavailable"]
+  ])("classifies installation failure without returning native text", (message, category) => {
+    expect(parseAndroidInstallFailure("private stdout", message + "\nprivate user input"))
+      .toEqual({ packageManagerCategory: category });
+  });
+  it("omits unknown output and overlong or malformed codes", () => {
+    for (const output of [
+      "Failure [/private/app.apk: private user input]",
+      "INSTALL_FAILED_" + "X".repeat(81),
+      "INSTALL_FAILED_secret_value"
+    ]) expect(parseAndroidInstallFailure(output, "")).toEqual({});
   });
 });

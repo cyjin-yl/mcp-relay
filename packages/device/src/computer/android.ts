@@ -133,6 +133,19 @@ export function parseAndroidLock(policy: string, power: string): { locked?: bool
     interactive, evidence };
 }
 
+/** Return only bounded package-manager codes/static classes, never native output or paths. */
+export function parseAndroidInstallFailure(stdout: string, stderr: string): Record<string, string> {
+  const output = stdout + "\n" + stderr;
+  const code = /\b(INSTALL_(?:FAILED|PARSE_FAILED)_[A-Z0-9_]{1,80})\b/.exec(output)?.[1];
+  if (code) return { packageManagerCode: code };
+  if (/\bSecurityException\b/.test(output)) return { packageManagerCategory: "package_manager_security_exception" };
+  if (/\bUnknown option\b/i.test(output)) return { packageManagerCategory: "unsupported_install_option" };
+  if (/Can't find service:\s*package\b|\bpackage (?:manager|service) (?:is )?unavailable\b/i.test(output)) {
+    return { packageManagerCategory: "package_service_unavailable" };
+  }
+  return {};
+}
+
 function parseProbe(text: string): Probe {
   const part = sections(text);
   const integer = (value: string | undefined) => {
@@ -217,7 +230,7 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
   /** Root has its own watchdog. A dead Termux su client does not prove root work ended. */
   const rootCommand = async (
     command: string, context: NativeContext,
-    options: { input?: string | Buffer; mutates?: boolean; outputLimit?: number; cleanupSeconds?: number; watchdog?: boolean } = {}
+    options: { input?: string | Buffer; mutates?: boolean; packageInstall?: boolean; outputLimit?: number; cleanupSeconds?: number; watchdog?: boolean } = {}
   ): Promise<NativeResult> => {
     if (context.signal?.aborted) throw new ComputerError("cancelled", "Android action was cancelled before execution.", { mayHaveApplied: false });
     const cleanupSeconds = options.cleanupSeconds ?? 2;
@@ -235,7 +248,8 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
       if (result.exitCode !== 0) {
         throw new ComputerError(result.exitCode === 124 || result.exitCode === 137 ? "android_root_timeout" : "android_command_failed",
           "The Android root command did not complete successfully.",
-          { exitCode: result.exitCode, mayHaveApplied: Boolean(options.mutates) });
+          { exitCode: result.exitCode, mayHaveApplied: Boolean(options.mutates),
+            ...(options.packageInstall ? parseAndroidInstallFailure(result.stdout.toString("utf8"), result.stderr.toString("utf8")) : {}) });
       }
       return result;
     } catch (error) {
@@ -432,22 +446,38 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
       return capture(await probe(context), context);
     },
     async setup(context) {
-      const value = await probe(context);
-      requireActions(value);
-      if (bridgeInstalled(value)) return { installed: true, changed: false, package: ANDROID_INPUT_PACKAGE, version: bridge.version, sha256: bridge.sha256 };
-      if (!bridgeBundled()) throw new ComputerError("android_bridge_not_bundled", "This build does not contain a signed Android input bridge.");
-      const apk = Buffer.from(bridge.base64, "base64");
-      if (apk.length < 1000 || apk.length > 2 * 1024 * 1024 || createHash("sha256").update(apk).digest("hex") !== bridge.sha256) {
-        throw new ComputerError("android_bridge_integrity_failed", "The bundled Android input bridge failed integrity verification.");
+      let phase: "preflight" | "install" | "verification" = "preflight";
+      try {
+        const value = await probe(context);
+        requireActions(value);
+        if (bridgeInstalled(value)) return { installed: true, changed: false, package: ANDROID_INPUT_PACKAGE, version: bridge.version, sha256: bridge.sha256 };
+        if (!bridgeBundled()) throw new ComputerError("android_bridge_not_bundled", "This build does not contain a signed Android input bridge.");
+        const apk = Buffer.from(bridge.base64, "base64");
+        if (apk.length < 1000 || apk.length > 2 * 1024 * 1024 || createHash("sha256").update(apk).digest("hex") !== bridge.sha256) {
+          throw new ComputerError("android_bridge_integrity_failed", "The bundled Android input bridge failed integrity verification.");
+        }
+        const command = ["/system/bin/pm", "install", "-r", "--user", String(value.user), "-S", String(apk.length), "-"].map(quote).join(" ");
+        phase = "install";
+        const result = await rootCommand(command, context, { input: apk, mutates: true, packageInstall: true, outputLimit: 64 * 1024, cleanupSeconds: 3 });
+        if (!/^Success\s*$/m.test(result.stdout.toString("utf8"))) {
+          throw new ComputerError("android_bridge_install_unconfirmed", "Android did not confirm installation of the input bridge.", {
+            mayHaveApplied: true, ...parseAndroidInstallFailure(result.stdout.toString("utf8"), result.stderr.toString("utf8"))
+          });
+        }
+        phase = "verification";
+        const verified = await probe(context);
+        if (!bridgeInstalled(verified)) throw new ComputerError("android_bridge_install_unconfirmed", "The installed bridge APK did not match the bundled SHA256.", { mayHaveApplied: true });
+        return { installed: true, changed: true, package: ANDROID_INPUT_PACKAGE, version: bridge.version, sha256: bridge.sha256, inputMethodChanged: verified.selectedIme !== value.selectedIme };
+      } catch (error) {
+        const known = error instanceof ComputerError ? error : undefined;
+        // Read-only verification cannot erase a preceding installation.
+        // During install, retain an explicit pre-spawn/cancellation guarantee of no mutation.
+        const mayHaveApplied = phase === "verification"
+          || (phase === "install" && known?.details?.mayHaveApplied !== false);
+        throw new ComputerError(known?.code ?? "android_setup_failed",
+          known?.message ?? "Android input bridge setup did not complete successfully.",
+          { ...known?.details, phase, mayHaveApplied });
       }
-      const command = ["/system/bin/pm", "install", "-r", "--user", String(value.user), "-S", String(apk.length), "-"].map(quote).join(" ");
-      const result = await rootCommand(command, context, { input: apk, mutates: true, outputLimit: 64 * 1024, cleanupSeconds: 3 });
-      if (!/^Success\s*$/m.test(result.stdout.toString("utf8"))) {
-        throw new ComputerError("android_bridge_install_unconfirmed", "Android did not confirm installation of the input bridge.", { mayHaveApplied: true });
-      }
-      const verified = await probe(context);
-      if (!bridgeInstalled(verified)) throw new ComputerError("android_bridge_install_unconfirmed", "The installed bridge APK did not match the bundled SHA256.", { mayHaveApplied: true });
-      return { installed: true, changed: true, package: ANDROID_INPUT_PACKAGE, version: bridge.version, sha256: bridge.sha256, inputMethodChanged: verified.selectedIme !== value.selectedIme };
     },
     async act(action: ComputerAction, display: ComputerDisplay, context: NativeContext): Promise<Record<string, unknown>> {
       if (action.type === "move") throw new ComputerError("unsupported_action", "Android touch input has no hover pointer.");
