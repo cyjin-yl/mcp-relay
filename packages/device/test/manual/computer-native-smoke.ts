@@ -188,13 +188,16 @@ async function main(): Promise<void> {
     try { return JSON.parse(readFileSync(fixture.statePath, "utf8")) as FixtureState; } catch { return undefined; }
   }
   async function focused(): Promise<FixtureState> {
+    let accepted: FixtureState | undefined;
     await until(() => {
       const child = fixture?.child;
       if (child && (child.exitCode !== null || child.signalCode !== null))
         throw new Error("Owned fixture exited before focus: " + JSON.stringify({ exitCode: child.exitCode, signalCode: child.signalCode }));
-      return fixtureState()?.foreground === true;
+      const candidate = fixtureState();
+      if (candidate?.foreground !== true) return false;
+      assert.equal(candidate.title, fixture!.title); accepted = candidate; return true;
     }, 10000, "owned fixture focus");
-    const state = fixtureState()!; assert.equal(state.title, fixture!.title); return state;
+    assert(accepted); return accepted;
   }
   let frameNumber = 0;
   async function frame(waitForCancelledCleanup = false): Promise<Frame> {
@@ -336,11 +339,11 @@ async function main(): Promise<void> {
     }
     assert(fixture, "Native test fixture must be ready before UI input.");
     await check("native PNG dimensions and screenshot pixel mapping", async () => {
-      const shot = await frame(); local(shot.display, fixtureState()!.regions.text);
+      const shot = await frame(); local(shot.display, (await focused()).regions.text);
       report.display = shot.display;
     });
     await check("native pointer movement matches screenshot coordinates", async () => {
-      const expected = fixtureState()!.regions.dragStart;
+      const expected = (await focused()).regions.dragStart;
       await act((display, state) => ({ type: "move", ...local(display, state.regions.dragStart) }));
       await until(() => { const p = fixtureState()?.pointer; return !!p && Math.abs(p.x - expected.x) <= 2 && Math.abs(p.y - expected.y) <= 2; }, 5000, "pointer coordinates");
     });
@@ -355,22 +358,22 @@ async function main(): Promise<void> {
       await until(() => fixtureState()?.text === "replaced ✓", 6000, "shortcut selection and replacement");
     });
     await check("native button click", async () => {
-      const before = fixtureState()!.clickCount;
+      const before = (await focused()).clickCount;
       await act((display, state) => ({ type: "click", ...local(display, state.regions.click) }));
-      await until(() => fixtureState()!.clickCount > before, 5000, "button event");
+      await until(() => (fixtureState()?.clickCount ?? -1) > before, 5000, "button event");
     });
     await check("native drag delivers down, dragged movement and release", async () => {
-      const before = fixtureState()!.dragCount;
+      const before = (await focused()).dragCount;
       await act((display, state) => {
         const from = local(display, state.regions.dragStart), to = local(display, state.regions.dragEnd);
         return { type: "drag", fromX: from.x, fromY: from.y, toX: to.x, toY: to.y, durationMs: 400 };
       });
-      await until(() => fixtureState()!.dragCount > before, 5000, "drag event");
+      await until(() => (fixtureState()?.dragCount ?? -1) > before, 5000, "drag event");
     });
     await check("native wheel reaches the owned scroll region", async () => {
-      const before = fixtureState()!.scrollCount;
+      const before = (await focused()).scrollCount;
       await act((display, state) => ({ type: "scroll", direction: "down", amount: 3, ...local(display, state.regions.scroll) }));
-      await until(() => fixtureState()!.scrollCount > before, 5000, "scroll event");
+      await until(() => (fixtureState()?.scrollCount ?? -1) > before, 5000, "scroll event");
     });
     await check("cancelled drag releases input before the next action", async () => {
       const shot = await frame(), state = await focused(), from = local(shot.display, state.regions.dragStart),
@@ -383,11 +386,11 @@ async function main(): Promise<void> {
       const cancelled = await operation.promise;
       assert(cancelled.ok === false || cancelled.result?.isError === true);
       await until(() => (fixtureState() as FixtureState & { dragging?: boolean })?.dragging === false, 8000, "cancelled button release");
-      const before = fixtureState()!.clickCount;
+      const before = (await focused()).clickCount;
       await act((display, current) => ({ type: "click", ...local(display, current.regions.click) }), true);
-      await until(() => fixtureState()!.clickCount > before, 5000, "next action after cancellation");
+      await until(() => (fixtureState()?.clickCount ?? -1) > before, 5000, "next action after cancellation");
     });
-    report.finalFixture = fixtureState();
+    report.finalFixture = await focused();
     report.status = "passed"; report.passed = true; report.uiVerified = true;
   } catch (error) {
     report.status = "failed"; report.error = String(error); process.exitCode = 1;

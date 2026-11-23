@@ -80,7 +80,11 @@ $timer.Add_Tick({
  $record=@{title=$form.Text;foreground=($visible -and (-not $minimized) -and $owned -and $foregroundMatches);visible=$visible;minimized=$minimized;foregroundHandleMatches=$foregroundMatches;targetsOwned=$owned;
  pointer=@{x=[Windows.Forms.Cursor]::Position.X;y=[Windows.Forms.Cursor]::Position.Y};text=$text.Text;clickCount=$script:clicks;dragCount=$script:drags;scrollCount=$script:scrolls;moveCount=$script:moves;dragging=$script:dragging;
  regions=$regions}
- [IO.File]::WriteAllText($settings.state,($record|ConvertTo-Json -Depth 8 -Compress),(New-Object Text.UTF8Encoding($false)))
+ # Publish one complete same-directory snapshot; readers never see truncation.
+ $pendingState=$settings.state+'.writing'
+ [IO.File]::WriteAllText($pendingState,($record|ConvertTo-Json -Depth 8 -Compress),(New-Object Text.UTF8Encoding($false)))
+ if([IO.File]::Exists($settings.state)){[IO.File]::Replace($pendingState,$settings.state,$null)}
+ else{[IO.File]::Move($pendingState,$settings.state)}
 })
 $form.Add_Shown({
  [RelaySmokeWindow]::ShowWindow($form.Handle,5)|Out-Null

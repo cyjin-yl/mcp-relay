@@ -9,6 +9,7 @@ import { ComputerError, nativePoint, type ComputerAction, type ComputerBackend, 
 // https://developer.apple.com/documentation/coregraphics/cgpreflightscreencaptureaccess()
 // https://developer.apple.com/documentation/applicationservices/1460720-axisprocesstrusted
 // https://developer.apple.com/documentation/coregraphics/cgdisplaybounds(_:)
+// https://developer.apple.com/documentation/coregraphics/cgevent/init(keyboardeventsource:virtualkey:keydown:)
 // https://developer.apple.com/documentation/coregraphics/kcgsessiononconsolekey
 // https://developer.apple.com/documentation/coregraphics/cgsessioncopycurrentdictionary()
 // https://developer.apple.com/documentation/appkit/nsscreen/devicedescription
@@ -116,6 +117,27 @@ function buttonInfo(name) {
  if(name==='left')return{number:0,down:1,up:2};if(name==='right')return{number:1,down:3,up:4};
  if(name==='middle')return{number:2,down:25,up:26};fail('INVALID_BUTTON','Unsupported mouse button.');
 }
+// Track the modifier keys actually belonging to this chord. Left/right variants
+// share a mask, so releasing one must preserve the other variant's flag.
+function keyFlags(keys) {
+ var flags=0;
+ for(var i=0;i<keys.length;i++){
+  var code=keys[i];
+  if(code===54||code===55)flags|=0x100000;
+  else if(code===56||code===60)flags|=0x20000;
+  else if(code===58||code===61)flags|=0x80000;
+  else if(code===59||code===62)flags|=0x40000;
+ }
+ return flags;
+}
+function releaseKeys(pressed) {
+ var failure=null;
+ while(pressed.length){
+  var code=pressed.pop();
+  try{keyboard(code,false,keyFlags(pressed));}catch(error){if(!failure)failure=error;}
+ }
+ if(failure)throw failure;
+}
 function keyboard(code,down,flags) {
  var event=$.CGEventCreateKeyboardEvent(null,code,down);
  try {if([54,55,56,58,59,60,61,62].indexOf(code)>=0)$.CGEventSetType(event,12);$.CGEventSetFlags(event,flags||0);post(event);}finally{retainUntilHelperExit(event);}
@@ -163,13 +185,15 @@ function action(request) {
   }
  }else if(request.op==='key'){
   var pressed=[];
-  try {for(var k=0;k<request.keys.length;k++){keyboard(request.keys[k],true,request.flags);pressed.push(request.keys[k]);}}
-  finally {for(var r=pressed.length-1;r>=0;r--)keyboard(pressed[r],false,request.modifiersOnly?0:request.flags);}
+  // Apple's keyboard-event contract requires real modifier down/up events,
+  // not only modifier bits on ordinary key events.
+  try {for(var k=0;k<request.keys.length;k++){pressed.push(request.keys[k]);keyboard(request.keys[k],true,keyFlags(pressed));}}
+  finally {releaseKeys(pressed);}
  }else if(request.op==='text'){
   if(request.text.length>10000)fail('INVALID_ACTION','Text is limited to 10000 UTF-16 code units.');unicode(request.text);
  }else if(request.op==='release'){
   if(request.button){var b=buttonInfo(request.button),p=location();mouse(b.up,p.x,p.y,b.number,1);}
-  for(var r=request.keys.length-1;r>=0;r--)keyboard(request.keys[r],false,0);
+  releaseKeys(request.keys.slice());
  }else fail('INVALID_ACTION','Unknown native input operation.');
  return {dispatched:true,performed:request.op};
 }
@@ -212,7 +236,7 @@ export function macosKeyChord(keys: string[]): { keys: number[]; flags: number; 
     if (code === undefined) throw new ComputerError("UNSUPPORTED_KEY", "Unsupported native macOS key: " + key + ". Use text for characters.");
     normal.push(code);
   }
-  return { keys: normal.length ? normal : modifiers, flags, modifiersOnly: normal.length === 0 };
+  return { keys: [...new Set([...modifiers, ...normal])], flags, modifiersOnly: normal.length === 0 };
 }
 type NativeDisplay = ComputerDisplay & { captureIndex: number; nativeWidth: number; nativeHeight: number };
 type MacInfo = { available: boolean; displays: NativeDisplay[]; accessibility: boolean; inputAllowed: boolean; unicodeText: boolean;
