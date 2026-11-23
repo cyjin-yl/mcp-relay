@@ -144,9 +144,18 @@ async function main(): Promise<void> {
     const state = fixtureState()!; assert.equal(state.title, fixture!.title); return state;
   }
   let frameNumber = 0;
-  async function frame(): Promise<Frame> {
-    await focused();
-    const result = await call("computer_screenshot", {});
+  async function frame(waitForCancelledCleanup = false): Promise<Frame> {
+    const started = Date.now(), busyDeadline = started + 10000;
+    let busyReplies = 0, result: Result;
+    for (;;) {
+      await focused();
+      result = await call("computer_screenshot", {});
+      if (!waitForCancelledCleanup || result.isError !== true || data(result).code !== "computer_busy") break;
+      busyReplies++;
+      assert(Date.now() < busyDeadline, "Cancelled input cleanup did not release the computer lane within 10 seconds.");
+      await delay(100);
+    }
+    if (waitForCancelledCleanup) report.cancelCleanup = { busyReplies, elapsedMs: Date.now() - started };
     assert.notEqual(result.isError, true, JSON.stringify(data(result)));
     const metadata = data(result) as unknown as Frame;
     const image = result.content?.find(item => item.type === "image");
@@ -164,8 +173,9 @@ async function main(): Promise<void> {
       "Owned fixture must fit the selected primary display.");
     return point;
   }
-  async function act(make: (display: ComputerDisplay, state: FixtureState) => ComputerAction): Promise<void> {
-    const captured = await frame(), state = await focused();
+  async function act(make: (display: ComputerDisplay, state: FixtureState) => ComputerAction, waitForCancelledCleanup = false): Promise<void> {
+    // Only the read-only frame may wait after cancellation. Never replay input.
+    const captured = await frame(waitForCancelledCleanup), state = await focused();
     const result = await call("computer_action", { request_id: randomUUID(), frame_id: captured.frame_id,
       action: make(captured.display, state), screenshot_after: false, timeout_ms: 15000 });
     assert.notEqual(result.isError, true, JSON.stringify(data(result)));
@@ -300,7 +310,7 @@ async function main(): Promise<void> {
       assert(cancelled.ok === false || cancelled.result?.isError === true);
       await until(() => (fixtureState() as FixtureState & { dragging?: boolean })?.dragging === false, 8000, "cancelled button release");
       const before = fixtureState()!.clickCount;
-      await act((display, current) => ({ type: "click", ...local(display, current.regions.click) }));
+      await act((display, current) => ({ type: "click", ...local(display, current.regions.click) }), true);
       await until(() => fixtureState()!.clickCount > before, 5000, "next action after cancellation");
     });
     report.finalFixture = fixtureState();

@@ -103,6 +103,43 @@ jobs:
           }
           writeFileSync(join(root, 'artifact-provenance.json'), JSON.stringify(verified, null, 2) + '\n');
           NODE
+      - name: Diagnose system PowerShell startup with a frozen read-only probe
+        if: matrix.runtime == 'powershell51'
+        timeout-minutes: 3
+        continue-on-error: true
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { mkdirSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { spawnSync } from 'node:child_process';
+          const root = join(process.env.RUNNER_TEMP, 'relay-computer-native');
+          const evidence = join(root, 'startup-diagnostic'); mkdirSync(evidence, { recursive: true });
+          const url = 'https://relay.cyjin.dev/updates/device/candidates/a4b45084441464109eca15f1ca41394944b5cae9dcd57def2a2e4a5d6551123c/windows-native-startup-diagnostic-81d7f3c209edafbd5ed7ac05acfbb8dcf19b59bdaf8dc7a59c189e076e2fd941.cjs';
+          const sha = '81d7f3c209edafbd5ed7ac05acfbb8dcf19b59bdaf8dc7a59c189e076e2fd941';
+          const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(30000) });
+          if (!response.ok) throw new Error('Diagnostic fetch failed: ' + response.status);
+          const reader = response.body.getReader(), parts = []; let bytes = 0;
+          for (;;) { const chunk = await reader.read(); if (chunk.done) break;
+            bytes += chunk.value.length;
+            if (bytes > 1024 * 1024) { await reader.cancel(); throw new Error('Diagnostic exceeds size limit'); }
+            parts.push(chunk.value);
+          }
+          const body = Buffer.concat(parts);
+          if (createHash('sha256').update(body).digest('hex') !== sha) throw new Error('Diagnostic SHA256 mismatch');
+          const executable = join(root, 'windows-native-startup-diagnostic.cjs'); writeFileSync(executable, body);
+          writeFileSync(join(evidence, 'artifact-provenance.json'), JSON.stringify({ url, sha256: sha, bytes }, null, 2) + '\n');
+          const syntax = spawnSync(process.execPath, ['--check', executable], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+          if (syntax.status !== 0) throw new Error('Prebuilt diagnostic JavaScript syntax failed: ' + syntax.stderr);
+          const result = spawnSync(process.execPath, [executable, evidence], {
+            timeout: 130000, encoding: 'utf8', maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+          });
+          writeFileSync(join(evidence, 'stdout.log'), result.stdout ?? '');
+          writeFileSync(join(evidence, 'stderr.log'), result.stderr ?? '');
+          if (result.error) throw result.error;
+          if (result.status !== 0) throw new Error('Diagnostic exited ' + result.status + '; native UI acceptance still runs independently.');
+          NODE
       - name: Run actual CLI against owned native test window
         shell: bash
         env:

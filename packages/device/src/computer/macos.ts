@@ -9,6 +9,8 @@ import { ComputerError, nativePoint, type ComputerAction, type ComputerBackend, 
 // https://developer.apple.com/documentation/coregraphics/cgpreflightscreencaptureaccess()
 // https://developer.apple.com/documentation/applicationservices/1460720-axisprocesstrusted
 // https://developer.apple.com/documentation/coregraphics/cgdisplaybounds(_:)
+// https://developer.apple.com/documentation/coregraphics/kcgsessiononconsolekey
+// https://developer.apple.com/documentation/coregraphics/cgsessioncopycurrentdictionary()
 // https://developer.apple.com/documentation/appkit/nsscreen/devicedescription
 // https://developer.apple.com/documentation/appkit/nsscreen/backingscalefactor
 // https://developer.apple.com/library/archive/releasenotes/InterapplicationCommunication/RN-JavaScriptForAutomation/Articles/OSX10-10.html
@@ -41,19 +43,41 @@ function displays() {
  }
  return result;
 }
-function inspect() {
+function nativeBoolean(value,label) {
+ if(value===true||value===1)return true;if(value===false||value===0)return false;
+ fail('SESSION_QUERY_FAILED','macOS returned an unrecognized '+label+' value.');
+}
+function sessionState() {
  var session;try{session=ObjC.deepUnwrap($.CGSessionCopyCurrentDictionary());}catch(error){fail('SESSION_QUERY_FAILED','macOS session inspection failed: '+String(error.message||error));}
- var onConsole=session&&(session.CGSSessionOnConsoleKey===true||session.kCGSessionOnConsoleKey===true);
- var locked=!!(session&&session.CGSSessionScreenIsLocked);
+ // Apple documents a null dictionary as no Quartz GUI session. A missing or
+ // unrecognized key in a real dictionary is a helper failure, not OS denial.
+ if(session===null||session===undefined)return{present:false,onConsole:false,locked:false,consoleKey:null,consoleValueType:'null'};
+ if(typeof session!=='object'||Array.isArray(session))fail('SESSION_QUERY_FAILED','macOS did not return a session dictionary.');
+ var keys=[],constant;
+ try{constant=ObjC.unwrap($.kCGSessionOnConsoleKey);if(typeof constant==='string'&&constant.length)keys.push(constant);}catch(_){}
+ // kCGSessionOnConsoleKey is a CFSTR macro on some SDKs and is not exported
+ // through JXA there. The first literal is its actual WindowServer key.
+ keys=keys.concat(['kCGSSessionOnConsoleKey','kCGSessionOnConsoleKey','CGSSessionOnConsoleKey']);
+ var key=null;
+ for(var i=0;i<keys.length;i++){if(Object.prototype.hasOwnProperty.call(session,keys[i])){key=keys[i];break;}}
+ if(key===null)fail('SESSION_QUERY_FAILED','macOS session dictionary has no recognized console-state key.');
+ var onConsole=nativeBoolean(session[key],'console-state'),locked=false;
+ var lockKeys=['CGSSessionScreenIsLocked','kCGSSessionScreenIsLocked'];
+ for(var j=0;j<lockKeys.length;j++){if(Object.prototype.hasOwnProperty.call(session,lockKeys[j])){locked=nativeBoolean(session[lockKeys[j]],'screen-lock');break;}}
+ return{present:true,onConsole:onConsole,locked:locked,consoleKey:key,consoleValueType:typeof session[key]};
+}
+function inspect() {
+ var session=sessionState(),onConsole=session.onConsole,locked=session.locked;
  var front=$.NSWorkspace.sharedWorkspace.frontmostApplication,app=null;
  if(!front.isNil())app={id:ObjC.unwrap(front.bundleIdentifier)||String(front.processIdentifier),title:ObjC.unwrap(front.localizedName)||''};
  if(app&&app.id==='com.apple.loginwindow')locked=true;
+ session.locked=locked;
  var screens=displays(),available=!!onConsole&&!locked&&screens.length>0;
  var trusted=!!$.AXIsProcessTrusted();
  var posting=hasPostCheck?!!$.CGPreflightPostEventAccess():null;
  var capture=hasCaptureCheck?!!$.CGPreflightScreenCaptureAccess():null;
  return {available:available,displays:screens,app:app,accessibility:trusted,inputAllowed:trusted&&posting!==false,unicodeText:hasUnicode,
-  screenCapture:capture,postEventAccess:posting,locked:locked,onConsole:!!onConsole,
+  screenCapture:capture,postEventAccess:posting,locked:locked,onConsole:onConsole,session:session,
   reason:available?null:'No unlocked foreground WindowServer user session is available.'};
 }
 function requireInput(ignoreHeld) {
@@ -186,6 +210,7 @@ export function macosKeyChord(keys: string[]): { keys: number[]; flags: number; 
 type NativeDisplay = ComputerDisplay & { captureIndex: number; nativeWidth: number; nativeHeight: number };
 type MacInfo = { available: boolean; displays: NativeDisplay[]; accessibility: boolean; inputAllowed: boolean; unicodeText: boolean;
   screenCapture: boolean | null; postEventAccess: boolean | null; locked: boolean; onConsole: boolean;
+  session?: { present: boolean; onConsole: boolean; locked: boolean; consoleKey: string | null; consoleValueType: string };
   app?: { id?: string; title?: string }; reason?: string };
 type WireResponse = { ok?: boolean; code?: string; message?: string; result?: Record<string, unknown> };
 async function invoke(request: Record<string, unknown>, context: NativeContext): Promise<Record<string, unknown>> {
@@ -230,7 +255,7 @@ export function createMacosBackend(): ComputerBackend {
             input: state.inputAllowed ? "granted" : "denied", postEvents: permission(state.postEventAccess) },
           ...(state.app ? { app: state.app } : {}),
           ...(state.reason ? { reason: state.reason } : {}),
-          details: { setup: "If permission is denied, manually enable Screen Recording and Accessibility for the relay's responsible terminal/application in System Settings, then restart that application if macOS requires it. No permission requests or resets are issued.",
+          details: { session: state.session, setup: "If permission is denied, manually enable Screen Recording and Accessibility for the relay's responsible terminal/application in System Settings, then restart that application if macOS requires it. No permission requests or resets are issued.",
             controllableDisplayIds: state.displays.filter(item => item.primary).map(item => item.id),
             secondaryDisplays: "Enumerated for diagnostics only. This system-tool backend permits capture and input only on the primary display; non-primary screencapture numbering is not assumed.",
             coordinates: "Quartz global display points; PNG pixels mapped with per-display scale",

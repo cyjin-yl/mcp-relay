@@ -137,10 +137,19 @@ export async function runNative(spec: NativeCommand, ctx: NativeContext): Promis
       settle();
     });
     child.once("close", () => { closed = true; settle(); });
-    child.once("error", error => {
-      failure = new ComputerError("native_spawn_failed", "Could not start the native computer helper.",
-        { cause: (error as NodeJS.ErrnoException).code ?? "unknown", mayHaveApplied: false });
-      exited = true; closed = true; settle();
+    child.on("error", error => {
+      const cause = (error as NodeJS.ErrnoException).code ?? "unknown";
+      if (!child.pid) {
+        failure ??= new ComputerError("native_spawn_failed", "Could not start the native computer helper.",
+          { cause, mayHaveApplied: false });
+        exited = true; closed = true; settle();
+        return;
+      }
+      // A spawned process also emits error when a signal cannot be delivered.
+      // That is not an exit: retain the transaction until real exit/cleanup,
+      // including repeated errors while terminate() is already in progress.
+      stop(new ComputerError("native_process_failed", "The native computer helper reported a process error.",
+        { cause, mayHaveApplied: true }));
     });
     child.stdout!.on("data", (chunk: Buffer) => {
       if (failure) return;

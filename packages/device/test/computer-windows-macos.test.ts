@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { runInNewContext } from "node:vm";
 import { createWindowsBackend, windowsKeyCodes } from "../src/computer/windows.js";
 import { createMacosBackend, macosKeyChord } from "../src/computer/macos.js";
 import { runNative } from "../src/computer/native.js";
@@ -78,6 +79,48 @@ describe("Windows native boundary", () => {
 describe("macOS native boundary", () => {
   const native = { available: true, displays: [{ ...screen, nativeWidth: 1440, nativeHeight: 900, captureIndex: 1 }],
     accessibility: false, inputAllowed: false, screenCapture: false, postEventAccess: false, unicodeText: true, onConsole: true, locked: false };
+  function nativeSession(session: unknown, constant = "kCGSSessionOnConsoleKey") {
+    run.mockImplementationOnce(async command => {
+      // Execute the real JXA inspection code with framework calls replaced.
+      // This checks bridge-value handling without pretending to test native OS grants.
+      const source = String(command.input) + "\n(function(){try{return JSON.stringify({ok:true,result:inspect()});}catch(error){return JSON.stringify({ok:false,code:error.relayCode,message:error.message});}})()";
+      const output = runInNewContext(source, {
+        ObjC: { import() {}, bindFunction() {}, unwrap(value: unknown) { return value; }, deepUnwrap(value: unknown) { return value; } },
+        $: {
+          kCGSessionOnConsoleKey: constant, CGSessionCopyCurrentDictionary: () => session,
+          NSScreen: { screens: { count: 1, objectAtIndex: () => ({ deviceDescription: { objectForKey: () => 1 }, backingScaleFactor: 1 }) } },
+          CGDisplayBounds: () => ({ origin: { x: 0, y: 0 }, size: { width: 1024, height: 768 } }),
+          CGDisplayRotation: () => 0, CGDisplayIsMain: () => true,
+          NSWorkspace: { sharedWorkspace: { frontmostApplication: { isNil: () => true } } },
+          AXIsProcessTrusted: () => true, CGPreflightPostEventAccess: () => true, CGPreflightScreenCaptureAccess: () => true,
+        },
+      }, { timeout: 1000 }) as string;
+      return { stdout: Buffer.from(output), stderr: Buffer.alloc(0), exitCode: 0 };
+    });
+  }
+  it("recognizes the framework console key with native Boolean and NSNumber bridge values", async () => {
+    for (const value of [true, 1, false, 0]) {
+      nativeSession({ kCGSSessionOnConsoleKey: value });
+      const info = await createMacosBackend().inspect(ctx);
+      expect(info.available).toBe(value === true || value === 1);
+      expect(info.permissions.interactiveSession).toBe(value === true || value === 1 ? "granted" : "denied");
+    }
+    nativeSession({ actualFrameworkKey: 1 }, "actualFrameworkKey");
+    expect((await createMacosBackend().inspect(ctx)).available).toBe(true);
+  });
+  it("treats an unknown session dictionary as a helper failure rather than an OS permission denial", async () => {
+    for (const session of [{}, { kCGSSessionOnConsoleKey: "1" }, { kCGSSessionOnConsoleKey: 2 }, { kCGSSessionOnConsoleKey: true, CGSSessionScreenIsLocked: "false" }]) {
+      nativeSession(session);
+      const info = await createMacosBackend().inspect(ctx);
+      expect(info.available).toBe(false);
+      expect(info.permissions.interactiveSession).toBe("unknown");
+      expect(info.reason).toMatch(/session dictionary|unrecognized/);
+    }
+    nativeSession(null);
+    expect((await createMacosBackend().inspect(ctx)).permissions.interactiveSession).toBe("denied");
+    nativeSession({ kCGSSessionOnConsoleKey: 1, CGSSessionScreenIsLocked: 1 });
+    expect((await createMacosBackend().inspect(ctx)).available).toBe(false);
+  });
   it("keeps display availability distinct from TCC input and capture grants", async () => {
     run.mockResolvedValue(reply(native));
     const info = await createMacosBackend().inspect(ctx);
