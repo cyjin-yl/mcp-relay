@@ -1,6 +1,6 @@
 {
   "name": "@cyjin/mcp-relay",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "type": "module",
   "description": "Connect a local device to relay.cyjin.dev so ChatGPT and Claude can call explicit file, patch and shell tools",
   "license": "MIT",

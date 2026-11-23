@@ -70,30 +70,82 @@ function sections(text: string): Record<string, string> {
 
 /** Parse only display metadata. No UI text or app document content is inspected. */
 export function parseAndroidGeometry(display: string, window: string, size: string): Geometry | undefined {
-  const candidates = display.split(/\r?\n/).filter(line => line.includes("DisplayInfo{"));
-  for (const line of candidates) {
-    if (/\bdisplayId\s+[1-9]\d*\b/.test(line)) continue;
+  // Window dumps can contain multiple displays and a second, unscoped windows dump.
+  const headers = [...window.matchAll(/^[ \t]*(?:Display:\s*mDisplayId=(\d+)\b[^\n]*|WINDOW MANAGER\b[^\n]*)/gm)];
+  const defaultSections = headers.flatMap((header, index) => header[1] === "0"
+    ? [window.slice(header.index! + header[0].length, headers[index + 1]?.index ?? window.length)] : []);
+  const current: Geometry[] = [];
+  let invalidCurrent = false;
+  const readInfo = (line: string): Geometry | undefined => {
     const real = /\breal\s+(\d+)\s*x\s*(\d+)/.exec(line);
-    if (!real) continue;
-    const width = Number(real[1]), height = Number(real[2]);
-    if (!validDimension(width) || !validDimension(height)) continue;
     const rotation = /\brotation\s+([0-3])\b/.exec(line);
-    return { width, height, rotation: rotation ? Number(rotation[1]) : undefined, source: "display-info" };
+    if (!real || !rotation || !validDimension(Number(real[1])) || !validDimension(Number(real[2]))) return undefined;
+    return { width: Number(real[1]), height: Number(real[2]), rotation: Number(rotation[1]), source: "display-info" };
+  };
+  const agree = (values: Geometry[]): Geometry | undefined => {
+    const first = values[0];
+    return first && values.every(value => value.width === first.width && value.height === first.height && value.rotation === first.rotation)
+      ? first : undefined;
+  };
+  for (const section of defaultSections) {
+    for (const line of section.split(/\r?\n/).filter(line => line.includes("DisplayFrames"))) {
+      const frames = /DisplayFrames[^\n]*?\bw=(\d+)\s+h=(\d+)\s+r=([0-3])\b/.exec(line);
+      if (frames && validDimension(Number(frames[1])) && validDimension(Number(frames[2]))) {
+        current.push({ width: Number(frames[1]), height: Number(frames[2]), rotation: Number(frames[3]), source: "display-frames" });
+      } else invalidCurrent = true;
+    }
   }
-  const defaultSection = /Display:\s*mDisplayId=0\b([\s\S]*?)(?=\n\s*Display:\s*mDisplayId=|\s*$)/.exec(window)?.[1] ?? window;
-  const frames = /DisplayFrames[^\n]*?\bw=(\d+)\s+h=(\d+)\s+r=([0-3])\b/.exec(defaultSection);
-  if (frames && validDimension(Number(frames[1])) && validDimension(Number(frames[2]))) {
-    return { width: Number(frames[1]), height: Number(frames[2]), rotation: Number(frames[3]), source: "display-frames" };
+  // Base info describes the natural display and must not win over a window-manager override.
+  let ambiguousOverride = false;
+  for (const line of (display + "\n" + defaultSections.join("\n")).split(/\r?\n/)) {
+    const field = /^\s*(mDisplayInfo|mOverrideDisplayInfo)\s*=\s*(.*)$/.exec(line);
+    if (!field || field[2]!.trim() === "null") continue;
+    const id = /\bdisplayId\s+(\d+)\b/.exec(field[2]!);
+    if (field[1] === "mOverrideDisplayInfo" && !id) ambiguousOverride = true;
+    if (id?.[1] !== "0") continue;
+    const value = readInfo(field[2]!);
+    if (value) current.push(value);
+    else invalidCurrent = true;
   }
+  const rawRotations = defaultSections.flatMap(section =>
+    [...section.matchAll(/\bmRotation=(\S*)/g)].map(match => match[1]!));
+  if (rawRotations.some(value => !/^(?:ROTATION_)?(?:0|90|180|270|1|2|3)$/.test(value))) return undefined;
+  const rotations = rawRotations.map(value => Number(value.replace(/^ROTATION_/, "")))
+    .map(value => value > 3 ? value / 90 : value);
+  const rotation = rotations[0];
+  if (invalidCurrent || rotations.some(value => value !== rotation)) return undefined;
+  if (current.length) {
+    const value = agree(current);
+    return value && (rotation === undefined || value.rotation === rotation) ? value : undefined;
+  }
+  // Never hide a malformed effective record by substituting physical/base dimensions.
+  if (ambiguousOverride) return undefined;
   const dimensions = /Override size:\s*(\d+)x(\d+)/.exec(size) ?? /Physical size:\s*(\d+)x(\d+)/.exec(size);
-  const rotation = /\bmRotation=(?:ROTATION_)?(0|90|180|270|1|2|3)\b/.exec(window);
-  if (!dimensions || !rotation) return undefined;
-  const raw = Number(rotation[1]);
-  const turn = raw > 3 ? raw / 90 : raw;
-  let width = Number(dimensions[1]), height = Number(dimensions[2]);
-  if (!validDimension(width) || !validDimension(height)) return undefined;
-  if (turn % 2) [width, height] = [height, width];
-  return { width, height, rotation: turn, source: "wm-size" };
+  if (dimensions && rotation !== undefined) {
+    let width = Number(dimensions[1]), height = Number(dimensions[2]);
+    if (!validDimension(width) || !validDimension(height)) return undefined;
+    if (rotation % 2) [width, height] = [height, width];
+    return { width, height, rotation, source: "wm-size" };
+  }
+  // Base-only fallback needs a complete, explicitly default LogicalDisplay block
+  // whose override is null; a missing/unparseable override is not evidence of null.
+  const lines = display.split(/\r?\n/);
+  const bases: Geometry[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    const header = /^([ \t]*)Display 0:[^\n]*$/.exec(lines[index]!);
+    if (!header) continue;
+    let end = index + 1;
+    while (end < lines.length && (!lines[end]!.trim() || /^[ \t]*/.exec(lines[end]!)![0].length > header[1]!.length)) end++;
+    const section = lines.slice(index + 1, end).join("\n");
+    if (!/^\s*mDisplayId=0\s*$/m.test(section) || !/^\s*mOverrideDisplayInfo\s*=\s*null\s*$/m.test(section)) continue;
+    for (const line of section.split("\n")) {
+      if (!/^\s*mBaseDisplayInfo\s*=\s*DisplayInfo\{/.test(line) || !/\bdisplayId\s+0\b/.test(line)) continue;
+      const value = readInfo(line);
+      if (value) bases.push(value);
+    }
+  }
+  const base = agree(bases);
+  return base && (rotation === undefined || base.rotation === rotation) ? base : undefined;
 }
 
 export function parseAndroidApp(window: string): { id: string; title?: string } | undefined {
@@ -456,7 +508,8 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
         if (apk.length < 1000 || apk.length > 2 * 1024 * 1024 || createHash("sha256").update(apk).digest("hex") !== bridge.sha256) {
           throw new ComputerError("android_bridge_integrity_failed", "The bundled Android input bridge failed integrity verification.");
         }
-        const command = ["/system/bin/pm", "install", "-r", "--user", String(value.user), "-S", String(apk.length), "-"].map(quote).join(" ");
+        // End option parsing before the stdin operand: Android treats a bare "-" as an option.
+        const command = ["/system/bin/pm", "install", "-r", "--user", String(value.user), "-S", String(apk.length), "--", "-"].map(quote).join(" ");
         phase = "install";
         const result = await rootCommand(command, context, { input: apk, mutates: true, packageInstall: true, outputLimit: 64 * 1024, cleanupSeconds: 3 });
         if (!/^Success\s*$/m.test(result.stdout.toString("utf8"))) {

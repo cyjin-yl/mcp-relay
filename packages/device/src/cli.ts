@@ -18,7 +18,7 @@ import { computerSettingsPath, readComputerSettings, writeComputerSettings } fro
 import { runLauncher, runSupervisor, readUpdateStatus, requestUpdateCheck, requestWorkerReload, acquireUpdateLock } from "./updater.js";
 import type { ToolPack } from "./pack.js";
 
-const VERSION = "0.1.9";
+const VERSION = "0.1.10";
 const DEFAULT_URL = "https://relay.cyjin.dev";
 const SUPPORTED_PACKS: Record<string, true> = { minimal: true, omp: true, kernel: true, computer: true };
 

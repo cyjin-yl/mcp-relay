@@ -71,15 +71,61 @@ function fixture(options: {
 }
 
 describe("Android display and input metadata", () => {
-  it("takes the primary real display dimensions and rotation", () => {
-    const text = 'DisplayInfo{"External", displayId 2, real 900 x 600, rotation 0}\n'
+  it("takes explicitly identified current default display information", () => {
+    const text = 'mDisplayInfo=DisplayInfo{"External", displayId 2, real 900 x 600, rotation 0}\n'
       + 'mDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 2000 x 1200, rotation 1}';
     expect(parseAndroidGeometry(text, "", "")).toEqual({ width: 2000, height: 1200, rotation: 1, source: "display-info" });
   });
-  it("uses the rotated wm override only with an observed rotation", () => {
-    expect(parseAndroidGeometry("", "mRotation=ROTATION_90", "Physical size: 1200x2000\nOverride size: 600x1000"))
+  it("uses the observed landscape override and default frames instead of the natural base", () => {
+    const base = 'mBaseDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 1840 x 2944, rotation 0}';
+    const override = 'mOverrideDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 2944 x 1840, rotation 1}';
+    const window = "Display: mDisplayId=0\n  DisplayFrames w=2944 h=1840 r=1\n  mRotation=1";
+    expect(parseAndroidGeometry(base + "\n" + override, window, "Physical size: 1840x2944"))
+      .toEqual({ width: 2944, height: 1840, rotation: 1, source: "display-frames" });
+    expect(parseAndroidGeometry(base + "\n" + override + "\n" + override, "", ""))
+      .toEqual({ width: 2944, height: 1840, rotation: 1, source: "display-info" });
+  });
+  it("keeps frames and rotation inside the explicit default window block", () => {
+    const external = "Display: mDisplayId=2\n  DisplayFrames w=900 h=600 r=0\n  mRotation=0";
+    const primary = "Display: mDisplayId=0\n  DisplayFrames w=2944 h=1840 r=1\n  mRotation=1";
+    expect(parseAndroidGeometry("", external + "\n" + primary + "\nWINDOW MANAGER WINDOWS\n  DisplayFrames w=7 h=8 r=2", ""))
+      .toEqual({ width: 2944, height: 1840, rotation: 1, source: "display-frames" });
+    expect(parseAndroidGeometry("", "Display: mDisplayId=0\n  noCurrentGeometry\n" + external, "Physical size: 1840x2944"))
+      .toBeUndefined();
+  });
+  it.each([
+    ['unscoped info', 'mDisplayInfo=DisplayInfo{"Unknown", real 2944 x 1840, rotation 1}', ""],
+    ['unscoped frames', "", "DisplayFrames w=2944 h=1840 r=1\nmRotation=1"],
+    ['external only', 'mDisplayInfo=DisplayInfo{"External", displayId 2, real 900 x 600, rotation 0}', "Display: mDisplayId=2\n  mRotation=1"]
+  ])("refuses %s rather than assuming the first display is default", (_name, info, window) => {
+    expect(parseAndroidGeometry(info!, window!, "Physical size: 1840x2944")).toBeUndefined();
+  });
+  it("refuses conflicting or invalid effective default information", () => {
+    const current = 'mDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 2944 x 1840, rotation 1}';
+    const conflicting = 'mOverrideDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 1840 x 2944, rotation 0}';
+    expect(parseAndroidGeometry(current + "\n" + conflicting, "", "")).toBeUndefined();
+    expect(parseAndroidGeometry(current, "Display: mDisplayId=0\n  DisplayFrames w=1840 h=2944 r=0", "")).toBeUndefined();
+    expect(parseAndroidGeometry(current, "Display: mDisplayId=0\n  DisplayFrames w=0 h=0 r=1", "")).toBeUndefined();
+    expect(parseAndroidGeometry('mOverrideDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 0 x 0, rotation 1}',
+      "Display: mDisplayId=0\n  DisplayFrames w=2944 h=1840 r=1", "")).toBeUndefined();
+    expect(parseAndroidGeometry('mBaseDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 1840 x 2944, rotation 0}\n'
+      + 'mOverrideDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 0 x 0, rotation 1}', "", "")).toBeUndefined();
+  });
+  it("uses base-only geometry only when its explicit default override is null", () => {
+    const base = 'mBaseDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 1840 x 2944, rotation 0}';
+    expect(parseAndroidGeometry(base, "", "")).toBeUndefined();
+    const logical = "Logical Displays:\n  Display 0:\n    mDisplayId=0\n    " + base + "\n    mOverrideDisplayInfo=null\n"
+      + '  Display 2:\n    mDisplayId=2\n    mOverrideDisplayInfo=DisplayInfo{"External", displayId 2, real 900 x 600, rotation 0}';
+    expect(parseAndroidGeometry(logical, "", "")).toEqual({ width: 1840, height: 2944, rotation: 0, source: "display-info" });
+    expect(parseAndroidGeometry(logical.replace("    mOverrideDisplayInfo=null\n", ""), "", "")).toBeUndefined();
+  });
+  it("uses wm override dimensions only with an observed default-display rotation", () => {
+    expect(parseAndroidGeometry("", "Display: mDisplayId=0\n  mRotation=ROTATION_90", "Physical size: 1200x2000\nOverride size: 600x1000"))
       .toEqual({ width: 1000, height: 600, rotation: 1, source: "wm-size" });
     expect(parseAndroidGeometry("", "", "Physical size: 1200x2000")).toBeUndefined();
+    expect(parseAndroidGeometry("", "mRotation=ROTATION_90", "Physical size: 1200x2000")).toBeUndefined();
+    expect(parseAndroidGeometry("", "Display: mDisplayId=0\n  mRotation=0\n  mRotation=1", "Physical size: 1200x2000")).toBeUndefined();
+    expect(parseAndroidGeometry("", "Display: mDisplayId=0\n  mRotation=4", "Physical size: 1200x2000")).toBeUndefined();
   });
   it("extracts only the focused component rather than window text", () => {
     expect(parseAndroidApp("mCurrentFocus=Window{abc u0 com.example/.Editor}")).toEqual({ id: "com.example/.Editor", title: "com.example" });
@@ -124,12 +170,46 @@ describe("Android computer backend", () => {
     expect(test.calls.every(call => !Buffer.isBuffer(call.input))).toBe(true);
     expect(test.calls.some(call => /ime (?:enable|set|disable)\b/.test(String(call.input)))).toBe(false);
   });
-  it("installs only the hash-verified bundled APK during explicit setup", async () => {
-    const test = fixture({ installed: false });
+  it("installs the verified APK once using Android's stdin option boundary", async () => {
+    let installed = false;
+    // External contract: BasicShellCommandHandler.getNextOption consumes all "-" prefixes
+    // until "--"; PackageManagerShellCommand accepts the stdin "-" only after that scan.
+    // https://android.googlesource.com/platform/prebuilts/fullsdk/sources/+/88c7ff1cd72d6305ec59f97aadc2198cc2dc3592/android-34/com/android/modules/utils/BasicShellCommandHandler.java
+    const packageInstall = (args: string[], input: Buffer): NativeResult => {
+      let index = 0, replace = false, user: string | undefined, size: string | undefined;
+      while (index < args.length && args[index]!.startsWith("-")) {
+        const option = args[index++]!;
+        if (option === "--") break;
+        if (option === "-r") replace = true;
+        else if (option === "--user") user = args[index++];
+        else if (option === "-S") size = args[index++];
+        else return { stdout: Buffer.alloc(0), stderr: Buffer.from("Error: Unknown option: " + option), exitCode: 255 };
+      }
+      expect(args.slice(index)).toEqual(["-"]);
+      expect({ replace, user, size }).toEqual({ replace: true, user: "0", size: String(input.length) });
+      expect(input.equals(artifact)).toBe(true);
+      installed = true;
+      return ok("Success\n");
+    };
+    const rejected = packageInstall(["-r", "--user", "0", "-S", String(artifact.length), "-"], artifact);
+    expect(rejected.exitCode).toBe(255);
+    expect(rejected.stderr.toString()).toBe("Error: Unknown option: -");
+    expect(installed).toBe(false);
+
+    const test = fixture({
+      installed: false,
+      probe: () => ok(probe(installed)),
+      install: spec => {
+        expect(Buffer.isBuffer(spec.input)).toBe(true);
+        // All pm words here are fixed option names, a fixed executable, or numeric values.
+        const argv = [...spec.args[1]!.matchAll(/'([^']*)'/g)].map(match => match[1]!);
+        expect(argv.slice(0, 2)).toEqual(["/system/bin/pm", "install"]);
+        return packageInstall(argv.slice(2), spec.input as Buffer);
+      }
+    });
     expect(await test.backend.setup!(context)).toMatchObject({ installed: true, changed: true, sha256: bridge.sha256, inputMethodChanged: false });
     const install = test.calls.find(call => Buffer.isBuffer(call.input))!;
     expect(install.args[1]).toContain("timeout");
-    expect(install.args[1]).toContain("'install' '-r' '--user' '0'");
     const second = await test.backend.setup!(context);
     expect(second).toMatchObject({ installed: true, changed: false });
     expect(test.calls.filter(call => Buffer.isBuffer(call.input))).toHaveLength(1);
