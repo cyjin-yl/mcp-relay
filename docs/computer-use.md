@@ -1,4 +1,4 @@
-# Native computer use — device 0.1.8
+# Native computer use — device 0.1.9
 
 The optional computer pack adds computer_info, computer_screenshot, computer_action,
 computer_handoff, and computer_setup. Screenshots are native MCP PNG image blocks,
@@ -71,6 +71,12 @@ The bridge does not read surrounding document text.
 UTF-8 text is transported as base64 and committed through the active InputConnection.
 The original selected/enabled IME state is restored in cleanup. The exact request ID
 must be acknowledged. input text is not used as a pretend Unicode implementation.
+
+MCP setup failures identify preflight, install, or verification. A failed verification
+after installation remains mayHaveApplied=true. Only bounded package-manager
+failure codes or static diagnostic categories are returned; native output and
+paths are omitted. Reconcile the installed package before retrying an uncertain
+setup.
 
 Privileged actions have their own watchdog: the Termux su client's exit alone does
 not prove that root work ended. Unknown/cancelled outcomes wait for bounded cleanup
