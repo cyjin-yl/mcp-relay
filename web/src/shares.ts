@@ -37,8 +37,10 @@ function shareTime(unix: number): string {
 }
 
 function currentStatus(share: DeviceShare): ShareStatus {
+  // Only server state can end access. A fast client clock must not hide an
+  // unconsumed claim link or remove the owner's ability to revoke it.
   if (share.revokedAt || share.status === 'revoked') return 'revoked'
-  if (share.expiresAt * 1000 <= Date.now() || share.status === 'expired') return 'expired'
+  if (share.status === 'expired') return 'expired'
   return share.claimedAt || share.status === 'active' ? 'active' : 'pending'
 }
 
@@ -55,14 +57,15 @@ function setStatus(badge: HTMLElement, status: ShareStatus): void {
 
 function remainingTime(share: DeviceShare): string {
   if (currentStatus(share) === 'revoked') return '此分享的访问权限已终止'
+  if (currentStatus(share) === 'expired') return '访问权限已到期'
   const seconds = Math.max(0, Math.ceil(share.expiresAt - Date.now() / 1000))
-  if (seconds === 0 || currentStatus(share) === 'expired') return '访问权限已到期'
+  if (seconds === 0) return '本机倒计时已结束，以服务器状态为准'
   const minutes = Math.floor(seconds / 60)
   const hours = Math.floor(minutes / 60)
-  if (hours >= 24) return `剩余 ${Math.floor(hours / 24)} 天 ${hours % 24} 小时`
-  if (hours > 0) return `剩余 ${hours} 小时 ${minutes % 60} 分钟`
-  if (minutes > 0) return `剩余 ${minutes} 分 ${seconds % 60} 秒`
-  return `剩余 ${seconds} 秒`
+  if (hours >= 24) return `约剩余 ${Math.floor(hours / 24)} 天 ${hours % 24} 小时`
+  if (hours > 0) return `约剩余 ${hours} 小时 ${minutes % 60} 分钟`
+  if (minutes > 0) return `约剩余 ${minutes} 分 ${seconds % 60} 秒`
+  return `约剩余 ${seconds} 秒`
 }
 
 function shareError(error: unknown): string {
@@ -99,7 +102,7 @@ export function createShareManager(options: ShareManagerOptions): {
   let busy = false
   let mutationRevision = 0
   let refreshTask: Promise<void> | null = null
-  let lastRefresh = Date.now()
+  let lastRefresh = performance.now()
   const selected = new Set<string>()
   const deviceInputs = new Map<string, HTMLInputElement>()
   const createdResults = new Map<string, { share: DeviceShare; node: HTMLElement }>()
@@ -465,7 +468,7 @@ export function createShareManager(options: ShareManagerOptions): {
         reportError(error, listError)
         if (!sharesLoaded) renderRows()
       } finally {
-        lastRefresh = Date.now()
+        lastRefresh = performance.now()
         refreshTask = null
       }
     })()
@@ -523,7 +526,7 @@ export function createShareManager(options: ShareManagerOptions): {
       }
     }
     for (const [id, entry] of createdResults) if (currentStatus(entry.share) !== 'pending') forgetResult(id)
-    if (Date.now() - lastRefresh >= 30000 && document.visibilityState === 'visible' && element.getClientRects().length > 0 && !listCard.contains(document.activeElement)) void refresh()
+    if (performance.now() - lastRefresh >= 30000 && document.visibilityState === 'visible' && element.getClientRects().length > 0 && !listCard.contains(document.activeElement)) void refresh()
     window.setTimeout(tick, 1000)
   }
   updateSelection()

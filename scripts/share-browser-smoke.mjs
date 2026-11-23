@@ -217,6 +217,29 @@ async function sharesTab(page) {
   await page.locator('proto-ui-shadcn-tabs-trigger').filter({ hasText: '临时分享' }).click();
   await page.locator('#share-label').waitFor({ state: 'visible' });
 }
+async function assertOwnerClockSkew(page, row, expiresAt, expectedStatus, claimURL) {
+  const preview = page.locator('#share-duration-help');
+  const before = await preview.innerText();
+  // Shift only this browser context's clock beyond the server's fixed expiry.
+  // runFor fires the real one-second UI tick without a wall-clock sleep.
+  await page.clock.setSystemTime((expiresAt + 3600) * 1000);
+  try {
+    await page.clock.runFor(1000);
+    assert.notEqual(await preview.innerText(), before, 'The regular share UI tick did not run');
+    assert.ok(await row.getByText(expectedStatus, { exact: true }).isVisible(), 'Client time changed the authoritative server state');
+    const revoke = row.getByRole('button', { name: '撤销', exact: true });
+    assert.ok(await revoke.isVisible() && await revoke.isEnabled(), 'Clock skew removed the usable revoke control');
+    if (claimURL !== undefined) {
+      const link = page.locator('textarea[aria-label="一次性领取链接"]');
+      assert.ok(await link.isVisible(), 'Clock skew destroyed an unclaimed share link');
+      assert.equal(await link.inputValue(), claimURL);
+    }
+    passed(`Ahead-of-server browser time preserves ${expectedStatus} state and revoke access`);
+  } finally {
+    await page.clock.setSystemTime(Date.now());
+    await page.clock.runFor(1000);
+  }
+}
 async function main() {
   if (artifactDir) await mkdir(artifactDir, { recursive: true });
   await startProxy();
@@ -242,6 +265,8 @@ async function main() {
   const ownerContext = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'zh-CN', timezoneId: 'Asia/Shanghai' });
   await ownerContext.addCookies([{ name: 'mrl_session', value: session, url: origin, httpOnly: true, sameSite: 'Lax' }]);
   const owner = await ownerContext.newPage();
+  // Install before navigation so the console's actual timers are tracked.
+  await owner.clock.install({ time: Date.now() });
   observe(owner, 'owner');
   await owner.goto(`${origin}/app/`, { waitUntil: 'networkidle' });
   await sharesTab(owner);
@@ -267,6 +292,7 @@ async function main() {
   const row = owner.locator(`.share-table tr[data-share-id="${created.share.id}"]`);
   await row.getByText('待领取', { exact: true }).waitFor();
   passed('Console creates a fixed one-hour share for online and offline selected devices');
+  await assertOwnerClockSkew(owner, row, created.share.expiresAt, '待领取', claimURL);
 
   for (const method of ['GET', 'HEAD']) {
     const response = await fetch(`${origin}/share`, { method, headers: { Accept: 'text/markdown' } });
@@ -359,6 +385,7 @@ async function main() {
   await owner.locator('.share-list-card').getByRole('button', { name: '刷新', exact: true }).click();
   await refreshed;
   await row.getByText('已领取', { exact: true }).waitFor();
+  await assertOwnerClockSkew(owner, row, created.share.expiresAt, '已领取');
   await screenshot(owner, 'owner-active-desktop.png');
   await row.getByRole('button', { name: '撤销', exact: true }).click();
   const revokeResponse = owner.waitForResponse(response => new URL(response.url()).pathname === `/api/shares/${created.share.id}/revoke` && response.request().method() === 'POST');
