@@ -178,7 +178,7 @@ async function main(): Promise<void> {
       const stale = await call("computer_action", { ...args, request_id: randomUUID() });
       assert.equal(stale.isError, true); assert.equal(data(stale).code, "stale_frame");
     });
-    const text = "Relay PVE 0.1.9!?";
+    const text = "Relay PVE 0.1.9!? " + "Az09-_=+[]()! ".repeat(12);
     await check("ASCII text with uppercase and punctuation reaches the guest without Enter", async () => {
       await act({ type: "text", text });
       await until(() => state().text === text && state().keyDown === state().keyUp, 5000, "guest typed text and released keys");
@@ -217,17 +217,25 @@ async function main(): Promise<void> {
       await act({ type: "key", keys: ["ArrowLeft"] }, true);
       await until(() => state().lastKey === 105 && state().keyDown === state().keyUp, 5000, "next guest input after cancellation");
     });
-    await check("out-of-frame coordinates and unsupported Unicode fail before guest input", async () => {
+    await check("out-of-frame coordinates, horizontal scrolling and Unicode fail before guest input", async () => {
       let shot = await frame(); const before = state();
       const invalid = await call("computer_action", { request_id: randomUUID(), frame_id: shot.frame_id,
         action: { type: "click", x: shot.display.width, y: 0 } });
       assert.equal(invalid.isError, true); assert.equal(data(invalid).code, "coordinate_out_of_bounds");
+      for (const direction of ["left", "right"]) {
+        shot = await frame();
+        const horizontal = await call("computer_action", { request_id: randomUUID(), frame_id: shot.frame_id,
+          action: { type: "scroll", direction, amount: 3, x: 10, y: 10 } });
+        assert.equal(horizontal.isError, true); assert.equal(data(horizontal).code, "unsupported_action");
+      }
       shot = await frame();
       const unicode = await call("computer_action", { request_id: randomUUID(), frame_id: shot.frame_id,
         action: { type: "text", text: "中文" } });
       assert.equal(unicode.isError, true);
       await until(() => state().sequence > before.sequence, 2000, "guest receipt after refused input");
       assert.equal(state().clicks, before.clicks); assert.equal(state().keyDown, before.keyDown); assert.equal(state().text, before.text);
+      assert.equal(state().x, before.x); assert.equal(state().y, before.y);
+      assert.equal(state().wheelX, before.wheelX); assert.equal(state().wheelY, before.wheelY);
       report.unsupportedUnicode = data(unicode);
     });
     await frame("pve-final-frame.png");

@@ -90,7 +90,7 @@ export function createPveBackend(runtime: PveBackendRuntime = {}): ComputerBacke
     displayKind: "virtual", inputKind: "none", displays: [], actions: [], unicodeText: false,
     permissions: { pveHost: qm && pvesh ? "granted" : "denied", qmp: "unknown", screenCapture: "unknown", input: "unknown" },
     details: { guestAgentRequired: false, textMethod: "printable ASCII via US keyboard scan codes; guest layout and application handling may vary",
-      targetFormat: "pve:<VMID>", consoleSelection: "first live graphical console", hostDesktopIncluded: false } });
+      targetFormat: "pve:<VMID>", consoleSelection: "first live graphical console", scrollDirections: ["up", "down"], hostDesktopIncluded: false } });
 
   async function invoke<T>(request: Record<string, unknown>, context: NativeContext): Promise<T> {
     if (!qm || !pvesh) throw new ComputerError("pve_unavailable", "PVE host tools /usr/sbin/qm and /usr/bin/pvesh are unavailable.");
@@ -171,6 +171,9 @@ export function createPveBackend(runtime: PveBackendRuntime = {}): ComputerBacke
       if (action.type === "key") nativeAction = { ...action, keys: pveKeyChord(action.keys) };
       if (action.type === "text" && (action.text.length > 16384 || /[^\x20-\x7e]/.test(action.text))) {
         throw new ComputerError("unsupported_text", "PVE text supports printable ASCII with a US guest keyboard layout. Unicode, Enter, Tab, and other control characters are not typed implicitly.");
+      }
+      if (action.type === "scroll" && action.direction !== "up" && action.direction !== "down") {
+        throw new ComputerError("unsupported_action", "PVE console scrolling supports only up and down; horizontal wheel events are not delivered by the standard QEMU tablet.", { mayHaveApplied: false });
       }
       const releaseButton = action.type === "drag" ? "left" : action.type === "click" ? action.button ?? "left" : undefined;
       let failure: unknown;

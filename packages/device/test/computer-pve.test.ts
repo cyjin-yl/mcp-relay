@@ -151,7 +151,7 @@ describe.runIf(process.platform === "linux")("PVE backend with real Python and U
       .map(request => (request.arguments!.events as Event[]).filter(event => event.type === "btn" && event.data.button === "right"));
     expect(clickBatches.map(events => events.map(event => event.data.down))).toEqual([[true], [false], [false]]);
     await f.backend.act({ type: "key", keys: ["Control", "a"] }, screen.display, context);
-    await f.backend.act({ type: "scroll", direction: "left", amount: 2 }, screen.display, context);
+    await f.backend.act({ type: "scroll", direction: "up", amount: 2 }, screen.display, context);
     await f.backend.act({ type: "text", text: 'Az! "~[]' }, screen.display, context);
     const held = new Set<string>();
     for (const event of f.input) {
@@ -160,7 +160,7 @@ describe.runIf(process.platform === "linux")("PVE backend with real Python and U
     }
     expect(held.size).toBe(0);
     expect(f.input.some(event => event.type === "key" && (event.data.key as { data: string }).data === "ret")).toBe(false);
-    expect(f.input.filter(event => event.type === "btn" && event.data.button === "wheel-left")).toHaveLength(4);
+    expect(f.input.filter(event => event.type === "btn" && event.data.button === "wheel-up")).toHaveLength(4);
   });
 
   it("rejects unsupported text and keys before sending any input", async () => {
@@ -296,6 +296,20 @@ describe("PVE provider admission", () => {
         { vmid: 102, displayId: "pve:102", status: "stopped", graphicalConsole: "unknown", inputAvailable: false, qmpPermission: "unknown" }
       ] })), stderr: Buffer.alloc(0), exitCode: 0
     }) });
-    expect(await backend.inspect(context)).toMatchObject({ permissions: { qmp: "denied" }, actions: [] });
+    expect(await backend.inspect(context)).toMatchObject({ permissions: { qmp: "denied" }, actions: [], details: { scrollDirections: ["up", "down"] } });
+  });
+
+  it("rejects horizontal scrolling before invoking a helper or sending any input", async () => {
+    let runs = 0;
+    const backend = createPveBackend({ uid: () => 0, find: names => names[0], run: async () => {
+      runs++;
+      throw new Error("A rejected horizontal scroll must never invoke the helper");
+    } });
+    const target = { id: "pve:101", instanceId: "pve:101:fixture", x: 0, y: 0, width: 8, height: 6 };
+    for (const direction of ["left", "right"] as const) {
+      await expect(backend.act({ type: "scroll", direction, amount: 3 }, target, context))
+        .rejects.toMatchObject({ code: "unsupported_action", details: { mayHaveApplied: false } });
+    }
+    expect(runs).toBe(0);
   });
 });

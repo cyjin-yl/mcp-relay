@@ -97,6 +97,11 @@ PVE text input assumes a US keyboard layout and supports ASCII only;
 `unicodeText: false` accurately reports that limitation. Non-ASCII input must not
 be treated as successfully typed.
 
+PVE scrolling supports only `up` and `down`. Requests for `left` or `right` return
+`unsupported_action`; a QMP acknowledgement alone does not establish that the
+guest received horizontal wheel input. This restriction applies to the PVE
+backend; other platforms retain their own reported scroll capabilities.
+
 The relay device is the PVE host, so a temporary share of that device can access
 its enabled computer tools across the host's VMs, including VMs added later. Share
 scope still limits read versus input, but there is no VM-subset restriction within

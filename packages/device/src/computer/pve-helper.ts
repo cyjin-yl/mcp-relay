@@ -347,8 +347,8 @@ def perform(qmp, target, action, width, height, absolute):
             release_button(qmp, target, "left")
     elif kind == "scroll":
         direction = action.get("direction")
-        if direction not in ("up", "down", "left", "right"):
-            raise Failure("unsupported_action", "Unsupported scroll direction.")
+        if direction not in ("up", "down"):
+            raise Failure("unsupported_action", "PVE console scrolling supports only up and down; horizontal wheel events are not delivered by the standard QEMU tablet.")
         events = []
         if "x" in action or "y" in action:
             events.extend(point_events(action.get("x"), action.get("y"), width, height))

@@ -38,7 +38,11 @@ The repository package version, shared package version, wire protocol version, a
 Android input bridge version are separate identifiers. A device release does not
 require changing them.
 
-Build and test in the existing development container, not on the PVE host:
+Prefer the existing development container (CT102) for the JavaScript build and
+tests. An isolated Linux checkout with the same dependencies and working Unix
+sockets is also suitable; bound test concurrency on a busy PVE host. The owned VM
+acceptance harness runs on the PVE host after the bundle is frozen. Android APK
+builds, if needed, must use the dedicated container described below.
 
 ```sh
 npm ci
