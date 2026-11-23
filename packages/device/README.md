@@ -4,6 +4,8 @@ Run a long-lived device agent that lets ChatGPT and Claude call a small, explici
 
 The relay only authenticates, lists your online devices, and forwards tool calls. Files and commands run on your device, inside the root you choose.
 
+This branch builds the unpublished `0.1.6-transport.20261123` candidate. It combines the portable shell resolver from the public 0.1.5 line with queue deadlines, cancellation, independent reads and the full Android runtime-path allowlist. Installing the public `latest` package does not install this candidate; use its verified tarball until it is published.
+
 ## Quick start
 
 1. Sign in at <https://relay.cyjin.dev> with GitHub.
@@ -47,7 +49,7 @@ On the relay these appear as `d_<device-slug>__<tool>`, for example
 ## Safety
 
 - Every path is resolved and confined to `--root`; symlink escapes are rejected.
-- `bash` runs with a filtered environment and a 120 s maximum timeout.
+- `bash` runs with a filtered environment and a 120 s maximum timeout. It resolves the shell instead of assuming `/bin/bash`: `MCP_RELAY_BASH`, `$PREFIX/bin/bash`, Termux's absolute bash, `/bin/bash`, `bash` on `PATH`, then `sh`.
 - `write`/`edit` require the file to have been read in this device process and refuse to apply if it changed since that read.
 - `omp_apply_patch` requires `expected_hashes` for every update/delete; call `omp_hash` first.
 - Destructive bash commands (`rm -rf`, `dd`, `mkfs`, `shutdown`, `reboot`, recursive chmod/chown, etc.) are refused by `bash` and require a separate `bash_confirm` call with a one-time token. This is a speed bump, not a shell security boundary.
@@ -58,7 +60,7 @@ On the relay these appear as `d_<device-slug>__<tool>`, for example
 ## Environment
 
 - Node.js 22.5+.
-- Linux/macOS for `bash`; file tools work on Windows too, but the shell tool is disabled there.
+- Linux/macOS/Android Termux for `bash`; file tools work on Windows too, but the shell tool is disabled there.
 - Optional: `rg` (ripgrep) and `ast-grep` for faster/structural search.
 
 ## License

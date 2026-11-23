@@ -1,6 +1,8 @@
 # 设备调用、超时与限流
 
-本文对应服务端修复和设备包 `@cyjin/mcp-relay@0.1.4`。服务端与设备需要一起更新；
+本文对应服务端修复和设备包候选 `@cyjin/mcp-relay@0.1.6-transport.20261123`。
+该候选合并了 main 的可移植 shell 解析；已公开的 `0.1.5` 不包含本文的队列、取消和预算修复。
+候选尚未发布到 npm。服务端与设备需要一起更新；
 仅更新工具列表不能改变旧设备进程的执行逻辑。
 
 ## 调用顺序
@@ -73,8 +75,11 @@ Android 设备 shell 额外保留八项固定系统路径变量：`ANDROID_DATA`
 `ANDROID_RUNTIME_ROOT`、`ANDROID_ART_ROOT`、`ANDROID_I18N_ROOT`、`ANDROID_TZDATA_ROOT`、
 `BOOTCLASSPATH`、`DEX2OATBOOTCLASSPATH`。它们供 ART、`app_process` 与 Termux-X11 使用。
 其它环境变量仍按原有白名单过滤，凭据和 `LD_PRELOAD` 不因这个修复透传。
-Android 从明确继承的 `PATH` 解析 `bash`，支持 Termux 的私有安装前缀；不依赖 `/bin/bash`
-存在或父进程加载路径重写 hook。其它受支持的 Unix 平台继续使用 `/bin/bash`。
+可移植 shell 解析保留 main 的 `MCP_RELAY_BASH` 显式覆盖、`PREFIX/bin/bash`、常用系统
+位置、`PATH` 查找与 `sh` 回退，并检查候选是可执行文件。`PREFIX` 会传给子进程；
+`MCP_RELAY_BASH` 仅供选择 shell，不额外透传。Android 支持 Termux 的私有安装前缀，
+不依赖 `/bin/bash` 存在或父进程加载路径重写 hook。无论选中 bash 还是 sh，均使用
+非登录的 `-c`，不会恢复 main 原有的 bash `-lc` 行为。
 
 ## 验证入口
 

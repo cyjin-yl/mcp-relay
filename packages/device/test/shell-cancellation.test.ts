@@ -65,6 +65,8 @@ it("finds Android bash in the Termux prefix without LD_PRELOAD path rewriting", 
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, "bash"), "#!/bin/sh\nprintf 'termux-bash\\n'\nexec /bin/bash \"$@\"\n", { mode: 0o755 });
   vi.stubEnv("PATH", bin);
+  vi.stubEnv("PREFIX", join(root, "termux", "usr"));
+  vi.stubEnv("MCP_RELAY_BASH", undefined);
   vi.stubEnv("LD_PRELOAD", "/untrusted/exec-rewrite.so");
   try {
     const result = await runShell(root, "printf 'command-ok|%s' \"${LD_PRELOAD-unset}\"", undefined, 2000, undefined, "android");

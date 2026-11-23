@@ -12,7 +12,7 @@ import { createOmpPack } from "./packs/omp.js";
 import { createKernelPack } from "./packs/kernel.js";
 import type { ToolPack } from "./pack.js";
 
-const VERSION = "0.1.4";
+const VERSION = "0.1.6-transport.20261123";
 const DEFAULT_URL = "https://relay.cyjin.dev";
 const SUPPORTED_PACKS: Record<string, true> = { minimal: true, omp: true, kernel: true };
 

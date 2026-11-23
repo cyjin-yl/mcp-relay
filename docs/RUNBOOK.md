@@ -215,7 +215,7 @@ certbot 自带 timer 负责续期；deploy hook 负责“复制 + reload”。�
   - `/mcp`
   - `/device/ws`
 - 缓存：上述路径加 bypass 规则；服务端本身返回 `Cache-Control: no-store`，但不要让边缘缓存 `/mcp`
-- Cloudflare 默认 Proxy Read Timeout 为 125 s；0.1.4 的 shell 最大内部响应预算为 123 s。
+- Cloudflare 默认 Proxy Read Timeout 为 125 s；transport 候选的 shell 最大内部响应预算为 123 s。
   部署时检查 Caddy transport 的读取限制，不能配置为早于该预算的值；普通工具仍为 20 s。
 
 ## 7. SQLite 备份与恢复

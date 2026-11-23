@@ -301,7 +301,7 @@ WWW-Authenticate: Bearer error="insufficient_scope", scope="relay.write", resour
 
 ### 调用超时与限流
 
-- 服务端与设备包都升级到 0.1.4 对应实现后，shell 的排队时间计入调用预算，过期排队任务不会稍后执行；读取工具有独立的并发队列。
+- 服务端与设备包都使用 `0.1.6-transport.20261123` 候选对应实现后，shell 的排队时间计入调用预算，过期排队任务不会稍后执行；读取工具有独立的并发队列。公开的 `0.1.5` 不包含这些 transport 修复。
 - HTTP 429 返回 `Retry-After` 和 `retry_after`、`scope`，按剩余窗口等待；设备执行、发现控制请求和账号总量各有额度。
 - `bash` 使用明确环境下的非登录 shell，不自动加载登录 profile。需要的命令初始化应写进命令本身。
 - 刷新工具列表不能替代重启设备进程。详见 [设备调用、超时与限流](TRANSPORT.md)。

@@ -1,3 +1,5 @@
+import { accessSync, constants, statSync } from "node:fs";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { resolveInsideRoot } from "./paths.js";
 
@@ -13,9 +15,79 @@ export type ShellResult = {
   timedOut: boolean;
 };
 
+export type ResolvedShell = { path: string; args: string[] };
+
+let cachedShell: { environment: string; shell: ResolvedShell } | null = null;
+
+function executable(path: string): string | null {
+  try {
+    // Resolve against the daemon's cwd before spawn changes to the tool cwd.
+    // Otherwise a relative override/PATH entry could select another file.
+    const absolute = resolve(path);
+    if (!statSync(absolute).isFile()) return null;
+    accessSync(absolute, constants.X_OK);
+    return absolute;
+  } catch {
+    return null;
+  }
+}
+
+function resolveExecutable(command: string): string | null {
+  if (command.includes("/") || isAbsolute(command)) return executable(command);
+  const dirs = [
+    ...(process.env.PATH ?? "").split(delimiter).filter(Boolean),
+    ...(process.env.PREFIX ? [join(process.env.PREFIX, "bin")] : []),
+    "/data/data/com.termux/files/usr/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin"
+  ];
+  for (const dir of dirs) {
+    const found = executable(join(dir, command));
+    if (found) return found;
+  }
+  return null;
+}
+
+export function resolveShell(): ResolvedShell {
+  // Reuse resolution only while the explicit shell-selection environment and
+  // executable remain valid. Tests and embedded callers may change the env.
+  const environment = JSON.stringify([
+    process.env.MCP_RELAY_BASH, process.env.PREFIX, process.env.PATH, process.env.SHELL
+  ]);
+  if (cachedShell?.environment === environment && executable(cachedShell.shell.path)) {
+    return cachedShell.shell;
+  }
+  const candidates = [
+    process.env.MCP_RELAY_BASH,
+    process.env.PREFIX ? join(process.env.PREFIX, "bin", "bash") : undefined,
+    "/data/data/com.termux/files/usr/bin/bash",
+    "/bin/bash",
+    "/usr/local/bin/bash",
+    "/usr/bin/bash",
+    "bash",
+    process.env.SHELL,
+    "/system/bin/sh",
+    "/bin/sh",
+    "sh"
+  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+  for (const candidate of candidates) {
+    const path = resolveExecutable(candidate);
+    if (!path) continue;
+    // Login profiles can run unrelated startup hooks. Preserve portable shell
+    // resolution without charging those hooks to every tool execution budget.
+    const shell: ResolvedShell = { path, args: ["-c"] };
+    cachedShell = { environment, shell };
+    return shell;
+  }
+  throw new Error(
+    "no executable shell found; install bash or set MCP_RELAY_BASH to its absolute path"
+  );
+}
+
 export function shellEnvironment(platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { MCP_RELAY: "1" };
-  const keys = ["PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR"];
+  const keys = ["PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR", "PREFIX"];
   if (platform === "android") {
     // Android's app_process/ART and Termux-X11 need these system paths even
     // for --help. Keep the allowlist explicit; never copy the caller's env.
@@ -42,14 +114,9 @@ export function runShell(
   }
   signal?.throwIfAborted();
   const cwd = cwdInput ? resolveInsideRoot(root, cwdInput) : root;
+  const shell = resolveShell();
   return new Promise((resolve, reject) => {
-    // Commands inherit the explicit environment below. Login profiles can run
-    // unrelated startup hooks and must not consume a tool's execution budget.
-    // Termux installs bash under its private prefix, not /bin. Resolve it from
-    // the same explicit PATH passed to the child, without relying on Android's
-    // optional LD_PRELOAD exec-path rewriting hook in the parent Node process.
-    const shell = platform === "android" ? "bash" : "/bin/bash";
-    const child = spawn(shell, ["-c", command], {
+    const child = spawn(shell.path, [...shell.args, command], {
       cwd,
       env: shellEnvironment(platform),
       detached: true,
