@@ -107,8 +107,10 @@ export function parseAndroidGeometry(display: string, window: string, size: stri
     if (value) current.push(value);
     else invalidCurrent = true;
   }
+  // Configuration objects contain embedded mRotation values (including undefined).
+  // Only the standalone runtime field in the scoped default display is authoritative.
   const rawRotations = defaultSections.flatMap(section =>
-    [...section.matchAll(/\bmRotation=(\S*)/g)].map(match => match[1]!));
+    [...section.matchAll(/^[ \t]*mRotation=(\S*)/gm)].map(match => match[1]!));
   if (rawRotations.some(value => !/^(?:ROTATION_)?(?:0|90|180|270|1|2|3)$/.test(value))) return undefined;
   const rotations = rawRotations.map(value => Number(value.replace(/^ROTATION_/, "")))
     .map(value => value > 3 ? value / 90 : value);

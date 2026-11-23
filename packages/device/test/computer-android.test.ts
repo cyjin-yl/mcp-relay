@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   ANDROID_INPUT_METHOD, createAndroidBackend, parseAndroidGeometry, parseAndroidApp, parseAndroidLock, androidKeyCode, parseAndroidInstallFailure
@@ -84,6 +85,16 @@ describe("Android display and input metadata", () => {
       .toEqual({ width: 2944, height: 1840, rotation: 1, source: "display-frames" });
     expect(parseAndroidGeometry(base + "\n" + override + "\n" + override, "", ""))
       .toEqual({ width: 2944, height: 1840, rotation: 1, source: "display-info" });
+  });
+  it("ignores embedded Configuration rotations in a sanitized real default-display dump", () => {
+    const captured: { display: string; window: string; size: string } =
+      JSON.parse(readFileSync(new URL("./fixtures/android-default-display-config-rotation.json", import.meta.url), "utf8"));
+    expect(parseAndroidGeometry(captured.display, captured.window, captured.size))
+      .toEqual({ width: 2944, height: 1840, rotation: 1, source: "display-frames" });
+    // A malformed or conflicting standalone runtime field must still fail closed.
+    expect(parseAndroidGeometry(captured.display, captured.window.replace("    mRotation=1 #", "    mRotation=undefined #"), captured.size)).toBeUndefined();
+    expect(parseAndroidGeometry(captured.display, captured.window.replace("    mRotation=1 #", "    mRotation=0 #"), captured.size)).toBeUndefined();
+    expect(parseAndroidGeometry("", "Display: mDisplayId=0\n  configuration={mRotation=ROTATION_90}", "Physical size: 1840x2944")).toBeUndefined();
   });
   it("keeps frames and rotation inside the explicit default window block", () => {
     const external = "Display: mDisplayId=2\n  DisplayFrames w=900 h=600 r=0\n  mRotation=0";
