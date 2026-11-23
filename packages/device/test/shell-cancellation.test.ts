@@ -73,3 +73,20 @@ it("finds Android bash in the Termux prefix without LD_PRELOAD path rewriting", 
     expect(result.stderr).toBe("");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+it("finishes after its shell exits even when a detached child inherits output pipes", async () => {
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+  // This test owns the short-lived background process. It exits by itself;
+  // neither the relay nor this test signals unrelated background work.
+  const program = "const {spawn}=require('node:child_process');" +
+    "const child=spawn(process.execPath,['-e','setTimeout(()=>{},4000)'],{detached:true,stdio:'inherit'});" +
+    "child.unref();process.stdout.write('parent-exited');";
+  const started = performance.now();
+  const result = await runShell(tmpdir(), quote(process.execPath) + " -e " + quote(program), undefined, 10000);
+  expect(performance.now() - started).toBeLessThan(2800);
+  expect(result.exitCode).toBe(0);
+  expect(result.timedOut).toBe(false);
+  expect(result.stdout).toContain("parent-exited");
+  expect(result.stdoutTruncated).toBe(true);
+  expect(result.stderr).toContain("Background processes may still be running");
+}, 12000);

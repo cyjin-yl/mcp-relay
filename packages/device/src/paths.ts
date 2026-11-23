@@ -9,9 +9,9 @@ export function createRoot(input: string): string {
 }
 
 function inside(root: string, candidate: string): boolean {
-  if (candidate === root) return true;
-  const prefix = root.endsWith(sep) ? root : root + sep;
-  return candidate.startsWith(prefix);
+  // Native relative paths handle Windows drive-letter case and UNC roots.
+  const rel = relative(root, candidate);
+  return rel === "" || (rel !== ".." && !rel.startsWith(".." + sep) && !isAbsolute(rel));
 }
 
 export function resolveInsideRoot(root: string, input: string): string {

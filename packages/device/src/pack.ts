@@ -13,6 +13,8 @@ export type PackContext = {
 export interface ToolPack {
   id: string;
   tools: ToolDescriptor[];
+  /** State which cannot survive a worker restart must explicitly defer updates. */
+  updateBlockedReason?: () => string | undefined;
   call(name: string, args: JsonObject, ctx: PackContext): Promise<CallToolResult>;
 }
 

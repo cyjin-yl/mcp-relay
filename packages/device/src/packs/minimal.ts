@@ -5,7 +5,7 @@ import type { CallToolResult, JsonObject, ToolDescriptor } from "@mcp-relay/shar
 import { atomicWrite, fileMode, readFileSnapshot, sha256Buffer } from "../fsutil.js";
 import { displayPath, resolveInsideRoot } from "../paths.js";
 import { grepFiles, listFiles } from "../search.js";
-import { runShell, type ShellResult } from "../shell.js";
+import { runShell, shellAvailable, type ShellKind, type ShellResult } from "../shell.js";
 import { textResult, type PackContext, type ToolPack } from "../pack.js";
 
 const MAX_READ_BYTES = 2 * 1024 * 1024;
@@ -78,7 +78,7 @@ const lsSchema = z.object({
   path: z.string().optional()
 });
 
-const tools: ToolDescriptor[] = [
+const baseTools: ToolDescriptor[] = [
   descriptor("read", "Read a text file, optionally a line range. Use this when you need file contents.", readSchema, true),
   descriptor("write", "Create or overwrite a file with exact content. An existing file must be read first; it is refused if it changed since that read.", writeSchema, false),
   descriptor("edit", "Replace an exact substring in a file. The file must be read first and unchanged since that read. Fails if old_string is missing or ambiguous unless replace_all is true.", editSchema, false),
@@ -112,8 +112,16 @@ const DANGEROUS_COMMANDS: RegExp[] = [
   /\bgit\s+reset\s+--hard\b/
 ];
 
-function isDangerousCommand(command: string): boolean {
-  return DANGEROUS_COMMANDS.some((pattern) => pattern.test(command));
+const DANGEROUS_POWERSHELL_COMMANDS: RegExp[] = [
+  /\b(Remove-Item|Clear-Content|Clear-Disk|Format-Volume|Initialize-Disk|Remove-Partition)\b/i,
+  /\b(Stop-Computer|Restart-Computer|Stop-Process|shutdown|format|diskpart|taskkill)\b(?!-)/i,
+  /\b(rm|ri|del|erase|rd|rmdir|clc|kill|spps)\b(?!-)/i
+];
+
+function isDangerousCommand(command: string, kind: ShellKind): boolean {
+  return DANGEROUS_COMMANDS.some((pattern) =>
+    kind === "powershell" ? new RegExp(pattern.source, "i").test(command) : pattern.test(command))
+    || (kind === "powershell" && DANGEROUS_POWERSHELL_COMMANDS.some((pattern) => pattern.test(command)));
 }
 
 function formatShellResult(result: ShellResult): CallToolResult {
@@ -136,9 +144,18 @@ function countOccurrences(haystack: string, needle: string): number {
   }
 }
 
-export function createMinimalPack(): ToolPack {
+export function createMinimalPack(platform: NodeJS.Platform = process.platform): ToolPack {
+  // Keep Bash semantics explicit. Windows' WSL shim is not a Bash executable
+  // for the advertised Windows filesystem. Offer native PowerShell separately.
+  const tools = baseTools.filter((tool) =>
+    !tool.name.startsWith("bash") || shellAvailable("bash", platform));
+  if (platform === "win32" && shellAvailable("powershell", platform)) {
+    tools.splice(3, 0,
+      descriptor("powershell", "Run a native PowerShell command on Windows with UTF-8 output, without a profile. Use PowerShell syntax. Destructive commands require powershell_confirm.", bashSchema, false),
+      descriptor("powershell_confirm", "Execute the exact PowerShell command after a separate confirmation using the one-time token from powershell.", bashConfirmSchema, false));
+  }
   const localHashes = new Map<string, string>();
-  const pendingBash = new Map<string, { command: string; cwd?: string; timeoutMs: number; expires: number }>();
+  const pendingShell = new Map<string, { kind: ShellKind; command: string; cwd?: string; timeoutMs: number; expires: number }>();
   return {
     id: "minimal",
     tools,
@@ -206,34 +223,46 @@ export function createMinimalPack(): ToolPack {
             hashes.set(file, sha256Buffer(nextBuffer));
             return textResult(`replaced ${input.replace_all ? count : 1} occurrence(s) in ${displayPath(ctx.root, file)}`);
           }
-          case "bash": {
+          case "bash":
+          case "powershell": {
             if (!ctx.allowShell) throw new Error("shell tool is disabled on this device; start with --allow-shell");
+            const kind: ShellKind = name;
             const input = bashSchema.parse(args);
-            if (isDangerousCommand(input.command)) {
+            if (kind === "powershell" && platform !== "win32") {
+              throw new Error("powershell is available only on Windows devices; use bash");
+            }
+            if (isDangerousCommand(input.command, kind)) {
               const token = randomBytes(16).toString("base64url");
               const now = Date.now();
-              for (const [key, pending] of pendingBash) if (pending.expires <= now) pendingBash.delete(key);
-              pendingBash.set(token, {
+              for (const [key, pending] of pendingShell) if (pending.expires <= now) pendingShell.delete(key);
+              pendingShell.set(token, {
+                kind,
                 command: input.command,
                 ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
                 timeoutMs: input.timeout_ms ?? 30000,
                 expires: now + 120000
               });
-              return textResult(`Dangerous command requires a separate confirmation. Call bash_confirm with token ${token} and the exact same command. The user will be asked to confirm again.`, true);
+              return textResult("Dangerous command requires a separate confirmation. Call " + kind +
+                "_confirm with token " + token + " and the exact same command. The user will be asked to confirm again.", true);
             }
-            return formatShellResult(await runShell(ctx.root, input.command, input.cwd, input.timeout_ms ?? 30000, ctx.signal));
+            return formatShellResult(await runShell(ctx.root, input.command, input.cwd,
+              input.timeout_ms ?? 30000, ctx.signal, platform, kind));
           }
-          case "bash_confirm": {
+          case "bash_confirm":
+          case "powershell_confirm": {
             if (!ctx.allowShell) throw new Error("shell tool is disabled on this device; start with --allow-shell");
+            const kind: ShellKind = name === "bash_confirm" ? "bash" : "powershell";
             const input = bashConfirmSchema.parse(args);
-            const pending = pendingBash.get(input.token);
+            const pending = pendingShell.get(input.token);
             if (!pending || pending.expires <= Date.now()) {
-              pendingBash.delete(input.token);
-              throw new Error("confirmation token is missing or expired; run bash again");
+              pendingShell.delete(input.token);
+              throw new Error("confirmation token is missing or expired; run " + kind + " again");
             }
+            if (pending.kind !== kind) throw new Error("confirmation token belongs to a different shell");
             if (pending.command !== input.command) throw new Error("command does not match the confirmation token");
-            pendingBash.delete(input.token);
-            return formatShellResult(await runShell(ctx.root, pending.command, pending.cwd, pending.timeoutMs, ctx.signal));
+            pendingShell.delete(input.token);
+            return formatShellResult(await runShell(ctx.root, pending.command, pending.cwd,
+              pending.timeoutMs, ctx.signal, platform, kind));
           }
           case "grep": {
             const input = grepSchema.parse(args);

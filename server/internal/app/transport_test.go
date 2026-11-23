@@ -25,6 +25,12 @@ func TestToolExecutionTimeoutMatchesAdvertisedShellBudget(t *testing.T) {
 		{"bash", `{"timeout_ms":999999999}`, 31 * time.Second},
 		{"bash", `{"timeout_ms":"120000"}`, 31 * time.Second},
 		{"bash_confirm", `{}`, 121 * time.Second},
+		{"powershell", `{}`, 31 * time.Second},
+		{"powershell", `{"timeout_ms":1000}`, 2 * time.Second},
+		{"powershell", `{"timeout_ms":120000}`, 121 * time.Second},
+		{"powershell", `{"timeout_ms":999999999}`, 31 * time.Second},
+		{"powershell", `{"timeout_ms":"120000"}`, 31 * time.Second},
+		{"powershell_confirm", `{}`, 121 * time.Second},
 	} {
 		if got := toolExecutionTimeout(tc.tool, json.RawMessage(tc.args)); got != tc.want {
 			t.Errorf("%s %s: got %s, want %s", tc.tool, tc.args, got, tc.want)

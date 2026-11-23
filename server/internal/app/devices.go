@@ -144,11 +144,11 @@ func (d *LiveDevice) send(v any) error {
 // cleanup margin lets runShell reap its process group before the RPC expires.
 // Other tools retain the existing 20s budget.
 func toolExecutionTimeout(tool string, args json.RawMessage) time.Duration {
-	if tool == "bash_confirm" {
+	if tool == "bash_confirm" || tool == "powershell_confirm" {
 		// The approved timeout is stored only on the device with its one-use token.
 		return 121 * time.Second
 	}
-	if tool != "bash" {
+	if tool != "bash" && tool != "powershell" {
 		return deviceCallTimeout
 	}
 	budget := 30 * time.Second

@@ -36,7 +36,7 @@ server.on("connection", (peer) => {
     }
   });
 });
-const child = spawn(process.execPath, [cli, "connect", "--config", config, "--root", root, "--packs", "minimal,omp,kernel", "--allow-kernel"], {
+const child = spawn(process.execPath, [cli, "connect", "--no-auto-update", "--config", config, "--root", root, "--packs", "minimal,omp,kernel", "--allow-kernel"], {
   env: { PATH: process.env.PATH, HOME: root, TMPDIR: tmpdir() }, stdio: ["ignore", "pipe", "pipe"]
 });
 let logs = "";
@@ -60,7 +60,7 @@ async function waitFile(path) {
 }
 try {
   const announced = await Promise.race([hello.promise, exit.then(() => { throw new Error(`client exited before hello: ${logs}`); })]);
-  assert.equal(announced.device.version, "0.1.4");
+  assert.equal(announced.device.version, "0.1.7");
   for (const name of ["read", "bash", "bash_confirm", "kernel_eval", "kernel_reset"]) {
     assert.ok(announced.tools.some((tool) => tool.name === name), `missing tool ${name}`);
   }

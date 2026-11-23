@@ -36,12 +36,32 @@ export class CallScheduler<T> {
   private activeReaders = 0;
   private activeWriter = false;
   private closed = false;
+  private readonly idleListeners = new Set<() => void>();
   private readonly maxReaders: number;
   private readonly maxPending: number;
 
   constructor(maxReaders = 4, maxPending = 32) {
     this.maxReaders = maxReaders;
     this.maxPending = maxPending;
+  }
+
+  /** Includes cancelled operations until their executor actually stops. */
+  get pendingCount(): number { return this.tasks.size; }
+
+  onIdle(listener: () => void): () => void {
+    this.idleListeners.add(listener);
+    return () => { this.idleListeners.delete(listener); };
+  }
+
+  waitForIdle(): Promise<void> {
+    if (this.tasks.size === 0) return Promise.resolve();
+    return new Promise<void>((resolveIdle) => {
+      const unsubscribe = this.onIdle(() => { unsubscribe(); resolveIdle(); });
+    });
+  }
+
+  private notifyIdle(): void {
+    if (this.tasks.size === 0) for (const listener of this.idleListeners) listener();
   }
 
   schedule(id: string, readOnly: boolean, timeoutMs: number,
@@ -89,6 +109,7 @@ export class CallScheduler<T> {
       this.readers = this.readers.filter((entry) => entry !== task);
       this.writers = this.writers.filter((entry) => entry !== task);
       this.drain();
+      this.notifyIdle();
     }
   }
 
@@ -134,6 +155,7 @@ export class CallScheduler<T> {
         if (task.readOnly) this.activeReaders--;
         else this.activeWriter = false;
         this.drain();
+        this.notifyIdle();
       }
     })();
   }
