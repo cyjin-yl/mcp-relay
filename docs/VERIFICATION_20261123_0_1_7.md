@@ -133,3 +133,23 @@ a7b13d09bb33a3d3c8af52403e09d49e1a5a55b44472302c1e95be83c98a017d
 设备上的私有证据位于 `~/.mcp-relay/staging/ota-fc1bf1088fb7/cutover-2026-11-23T13-31-54-010Z-3300ffcb/`：`scheduled.json` 记录排程与 job PID，`receipt.json` 记录实际 OTA/配置/环境校验，`external-tool-acceptance.json` 记录真实 Bash 调用。原 launcher 备份与失败回滚材料保留；完整环境和私有 plan 不进入 Git。
 
 可复用的事务、私有 plan 准备和排程工具位于 [`deploy/android/`](../deploy/android/README.md)。本节只确认 Android 已完成迁移；Windows 离线设备和 Linux 活动 kernel 的后续状态应分别以各自的现场回执判断。
+
+## 最终设备状态与自动接续
+
+以下区分已经运行的版本与尚未具备首次迁移条件的设备。
+
+| 设备 | 已核验状态 | 后续动作 |
+| --- | --- | --- |
+| Android / localhost | 正式 0.1.7 已运行，worker 和 supervisor 同版；bootstrap → stable、SHA、配置、身份和真实 bash 调用通过 | 约每 5 分钟检查稳定通道，按 drain / readiness / rollback 流程更新 |
+| doesvm | 旧 worker 与 kernel 仍在；修订迁移 watcher 为 active / enabled，新 managed relay 为 inactive / disabled | 等旧 worker 自然退出，并确认观察到的任务后代退出后，自动迁移至稳定版本 |
+| TB14P-EZRA | 笔电仍离线；2026-11-23 21:32:34（UTC+8）有界安装尝试返回 75，原因是既有 SSH 不可达，未安装 | 条件任务在恢复可连接后执行同机原生验收，再执行有回滚保护的安装及真实工具验收 |
+
+doesvm 修订程序完整摘要为 `d59044513f78551d733aae0bfc4a1c14e236979f86cc382c24e0c0e86a1ec730`。北京时间 21:37:31 和 21:37:36 两次现场快照均确认：旧 launcher/worker 的 PID 与启动 ticks 保持、原入口 SHA 保持、`canMigrate=false`、`waiting-for-legacy-exit`，且新 managed relay 没有运行。后代身份已持久保存。该程序经 14 项开发容器回归测试，额外采用实机进程识别 dry-run；完整最终回执为 `.tmp/doesvm-watcher-enabled.json`。
+
+Windows 的单次安装工作有 720 秒上限和设备互斥锁，SSH、身份或权限阻碍不会触发自动提权、主机信任变更或其他进程的终止。首次离线回执位于 `.tmp/windows-deployment/20261123T133229Z-33277891de/attempt-receipt.json`，准确调用参数保留在私有 `.tmp/windows-deployment/invocation.json`，没有发布网络地址或凭据。
+
+已建立每小时的条件接续任务，首次检查设为 **2026-11-23 22:35，Asia/Shanghai**。该任务仅在实际进展或新阻碍时通知，完成全部设备的安装和验收后停止；它与已迁移客户端自身约 5 分钟一次的更新轮询是两个不同步骤。不能将定时任务已建立等同于离线笔电已完成安装。
+
+当前设备使用 HTTPS 发行通道。本轮环境没有 npm 发布凭据，因此没有声称已将 0.1.7 发布至 npm registry；旧 npm 入口仍需通过上述首次迁移流程接入受管更新。
+
+复用 Android 事务脚本的最后一项检查补齐了 tmux pane 的 PID、启动时间、可执行文件和参数身份校验：不匹配时保留证据并延后回滚，不能把被复用的 PID 当作受管进程。CT102 直接加载修改前后的生产函数，重现旧误识别，再验证正常路径及 7 种身份变化均按预期处理；没有发送进程信号或重新部署设备。相关回执为 `.tmp/android-pane-identity-check.json`，核心 CLI 与已成功的 Android 实机事务未变化。

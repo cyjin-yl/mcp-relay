@@ -31,10 +31,13 @@ function info(pid) {
       exe: fs.readlinkSync(base + "/exe"), args: fs.readFileSync(base + "/cmdline").toString().split("\0").filter(Boolean) };
   } catch { return null; }
 }
+function sameIdentity(current, expected) {
+  return Boolean(current && expected && current.state !== "Z" && current.pid === expected.pid
+    && current.start === expected.start && current.exe === expected.exe
+    && JSON.stringify(current.args) === JSON.stringify(expected.args));
+}
 function same(expected) {
-  const current = info(expected.pid);
-  return current && current.state !== "Z" && current.start === expected.start && current.exe === expected.exe
-    && JSON.stringify(current.args) === JSON.stringify(expected.args);
+  return Boolean(expected && sameIdentity(info(expected.pid), expected));
 }
 function allProcesses() {
   const values = [];
@@ -103,7 +106,19 @@ function launchSession() {
 }
 function snapshotNew() {
   const rows = allProcesses();
-  const owned = new Set(newPane ? [newPane.pid] : []);
+  const root = newPane && rows.find((item) => item.pid === newPane.pid);
+  // A reused pane PID must never become a new ownership root or replace its saved identity.
+  if (!sameIdentity(root, newPane) || !same(newPane)) {
+    const current = newPane ? info(newPane.pid) : null;
+    report.paneIdentityFailure = { expectedPid: newPane?.pid ?? null, expectedStart: newPane?.start ?? null,
+      observedStart: current?.start ?? null, observedState: current?.state ?? null,
+      executableMatches: Boolean(current && newPane && current.exe === newPane.exe),
+      argumentsMatch: Boolean(current && newPane && JSON.stringify(current.args) === JSON.stringify(newPane.args)),
+      checkedAt: stamp() };
+    save();
+    throw new Error("Managed pane identity changed or disappeared; rollback deferred without stopping processes");
+  }
+  const owned = new Set([newPane.pid]);
   let changed = true;
   while (changed) {
     changed = false;
@@ -112,11 +127,11 @@ function snapshotNew() {
     }
   }
   const own = rows.filter((item) => owned.has(item.pid));
-  for (const item of own) tracked.set(item.pid, item);
+  for (const item of own) tracked.set(item.pid, item.pid === newPane.pid ? newPane : item);
   return own;
 }
 function ownedRole(item) {
-  if (item.pid === newPane?.pid) return "environment-runner";
+  if (item.pid === newPane?.pid) return sameIdentity(item, newPane) ? "environment-runner" : null;
   if (item.exe === plan.bash && item.args[1] === plan.liveScript) return "launcher-loop";
   if (item.exe === plan.node && item.args.includes("connect") && configArgument(item) === plan.config
       && (item.args[1] === plan.bootstrapDestination
