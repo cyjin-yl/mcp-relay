@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { fork, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -264,7 +264,7 @@ async function main(): Promise<void> {
     for (const helper of helpers) await stopOwned(helper);
     for (const socket of server.clients) socket.terminate();
     await new Promise<void>((done) => server.close(() => done()));
-    const report = { platform: process.platform, node: process.version, bundle, evidence,
+    const report = { platform: process.platform, computerName: hostname(), completedAt: new Date().toISOString(), node: process.version, bundle, evidence,
       bundleSha256: createHash("sha256").update(readFileSync(bundle)).digest("hex"),
       deviceVersion: registration?.device?.version, tools: registration?.tools?.map((tool) => tool.name), cases,
       passed: cases.length === 10 && cases.every((item) => item.passed), workerLog };
