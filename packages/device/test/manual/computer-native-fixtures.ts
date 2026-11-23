@@ -152,13 +152,14 @@ window.makeFirstResponder(text);
 stage('responder-ready');
 function center(view,x,y,label){
  if(firstState)stage('region-'+label+'-view-convert-start');
- var inWindow=view.convertRectToView($.NSMakeRect(x,y,1,1),null);
+ // This operation needs one point, not a by-value NSRect. Use explicit ObjC nil.
+ var inWindow=view.convertPointToView($.NSMakePoint(x,y),$());
  if(firstState)stage('region-'+label+'-view-convert-ready');
- var onScreen=window.convertRectToScreen(inWindow);
+ var onScreen=window.convertPointToScreen(inWindow);
  if(firstState)stage('region-'+label+'-screen-convert-ready');
  var height=$.CGDisplayBounds($.CGMainDisplayID()).size.height;
  if(firstState)stage('region-'+label+'-height-ready');
- return{x:onScreen.origin.x,y:height-onScreen.origin.y};
+ return{x:onScreen.x,y:height-onScreen.y};
 }
 var deadline=Date.now()+240000,startupDeadline=Date.now()+10000,firstEvent=true,firstState=true,seenVisible=false;
 stage('event-loop-enter',{visible:!!window.isVisible,active:!!app.isActive});
