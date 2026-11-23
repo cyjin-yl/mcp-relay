@@ -257,10 +257,22 @@ KEYS = set("ctrl ctrl_r alt alt_r shift shift_r meta_l meta_r ret esc tab backsp
 KEYS.update(chr(value) for value in range(97, 123))
 KEYS.update(str(value) for value in range(10))
 KEYS.update("f" + str(value) for value in range(1, 13))
+MODIFIER_KEYS = set("ctrl ctrl_r alt alt_r shift shift_r meta_l meta_r".split())
+EXTENDED_KEYS = set("ctrl_r alt_r meta_l meta_r delete insert home end pgup pgdn up down left right print".split())
+
+def key_scan_cost(keys):
+    if not isinstance(keys, list) or not 1 <= len(keys) <= 8 or any(not isinstance(key, str) or key not in KEYS for key in keys) or len(set(keys)) != len(keys):
+        raise Failure("unsupported_key", "Unsupported or duplicate QEMU key name.")
+    # QEMU ui/input-keymap.c emits 1 ordinary, 2 extended or 3 Pause scan
+    # codes per edge. include/hw/input/hid.h has 16 FIFO slots; hid.c polls
+    # one scan code at a time and reports rollover above six non-modifiers.
+    cost = 2 * sum(3 if key == "pause" else 2 if key in EXTENDED_KEYS else 1 for key in keys)
+    if cost > 16 or sum(key not in MODIFIER_KEYS for key in keys) > 6:
+        raise Failure("unsupported_key", "This PVE key chord exceeds the guest keyboard's bounded FIFO or six-key rollover limit.")
+    return cost
 
 def key_events(keys):
-    if not isinstance(keys, list) or not 1 <= len(keys) <= 8 or len(set(keys)) != len(keys) or any(key not in KEYS for key in keys):
-        raise Failure("unsupported_key", "Unsupported or duplicate QEMU key name.")
+    key_scan_cost(keys)
     return ([{"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": key}}} for key in keys]
         + [{"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": key}}} for key in reversed(keys)])
 
@@ -283,6 +295,23 @@ def send_events(qmp, target, events):
     qmp.verify()
     INPUT_ATTEMPTED = True
     qmp.command("input-send-event", {"events": events, "device": target["device"], "head": target["head"]})
+
+def keyboard_wait(qmp, duration):
+    if remaining(qmp.deadline, 120) < duration:
+        raise Failure("timeout", "Insufficient time remains to pace the guest keyboard safely.")
+    time.sleep(duration)
+    remaining(qmp.deadline)
+
+def send_keyboard(qmp, target, keys):
+    delay = key_scan_cost(keys) * 0.02
+    # Reserve the pacing budget before sending another batch. Keep all down
+    # and up edges in one QMP request, so cancellation cannot split a chord.
+    if remaining(qmp.deadline, 120) < delay:
+        raise Failure("timeout", "Insufficient time remains for another guest keyboard batch.")
+    send_events(qmp, target, key_events(keys))
+    # QMP acknowledges acceptance, not guest consumption. Twenty milliseconds
+    # per scan code leaves margin over standard USB keyboard 8/10 ms polling.
+    keyboard_wait(qmp, delay)
 
 def button_event(button, down):
     return {"type": "btn", "data": {"button": button, "down": down}}
@@ -356,7 +385,10 @@ def perform(qmp, target, action, width, height, absolute):
             events.extend([button_event("wheel-" + direction, True), button_event("wheel-" + direction, False)])
         send_events(qmp, target, events)
     elif kind == "key":
-        send_events(qmp, target, key_events(action.get("keys")))
+        keys = action.get("keys")
+        key_scan_cost(keys)
+        keyboard_wait(qmp, 0.32)
+        send_keyboard(qmp, target, keys)
     elif kind == "text":
         text = action.get("text")
         if not isinstance(text, str) or len(text) > 16384 or any(not 32 <= ord(char) <= 126 for char in text):
@@ -364,12 +396,14 @@ def perform(qmp, target, action, width, height, absolute):
         # Validate the whole string before sending any input. Pair each key-up
         # in its same QMP request so helper cancellation cannot strand a key.
         chords = [text_keys(char) for char in text]
-        for index, chord in enumerate(chords):
-            send_events(qmp, target, key_events(chord))
-            # QMP acknowledgement does not mean the guest drained its finite
-            # keyboard queue. Pace text instead of flooding it at socket speed.
-            if index + 1 < len(chords):
-                time.sleep(min(0.01, remaining(qmp.deadline)))
+        for chord in chords:
+            key_scan_cost(chord)
+        if chords:
+            # A previous request may have been cancelled during its final
+            # drain wait. Give a full FIFO a bounded chance to settle first.
+            keyboard_wait(qmp, 0.32)
+        for chord in chords:
+            send_keyboard(qmp, target, chord)
     else:
         raise Failure("unsupported_action", "Unsupported PVE computer action.")
 

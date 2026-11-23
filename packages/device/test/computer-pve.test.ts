@@ -4,6 +4,7 @@ import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createPveBackend, pveKeyChord, pveVmId } from "../src/computer/pve.js";
+import { PVE_HELPER } from "../src/computer/pve-helper.js";
 import { runNative } from "../src/computer/native.js";
 import { type NativeCommand, type NativeContext } from "../src/computer/types.js";
 
@@ -107,6 +108,38 @@ async function fixture(options: { pngSupported?: boolean; graphical?: boolean; a
 }
 
 describe.runIf(process.platform === "linux")("PVE backend with real Python and Unix QMP sockets", () => {
+  it("enforces the helper's keyboard FIFO admission, deadline and empty-text behavior before QMP input", async () => {
+    const main = PVE_HELPER.indexOf("\ntry:\n    print(json.dumps(main()");
+    expect(main).toBeGreaterThan(0);
+    const script = PVE_HELPER.slice(0, main) + `
+output = []
+for keys in json.loads(sys.stdin.read()):
+    try:
+        output.append({"cost": key_scan_cost(keys), "events": key_events(keys)})
+    except Failure as error:
+        output.append({"code": error.code})
+no_input = type("NoInput", (), {"deadline": time.monotonic() - 1})()
+perform(no_input, {}, {"type": "text", "text": ""}, 8, 6, True)
+no_input.deadline = time.monotonic() + 0.001
+try:
+    send_keyboard(no_input, {}, ["a"])
+    raise AssertionError("An insufficient deadline must fail before QMP input")
+except Failure as error:
+    output.append({"code": error.code})
+print(json.dumps(output))
+`;
+    const result = await runNative({ command: "/usr/bin/python3", args: ["-I", "-c", script], input: JSON.stringify([
+      ["ctrl", "alt", "shift", "meta_l", "pause"],
+      ["up", "down", "left", "right", "home", "end", "pgup", "pgdn"],
+      ["a", "b", "c", "d", "e", "f", "g"]
+    ]) }, context);
+    expect(result.exitCode).toBe(0);
+    const output = JSON.parse(result.stdout.toString("utf8")) as Array<{ cost?: number; events?: Event[]; code?: string }>;
+    expect(output[0]?.cost).toBe(16);
+    expect(output[0]?.events?.map(event => event.data.down)).toEqual([true, true, true, true, true, false, false, false, false, false]);
+    expect(output.slice(1)).toEqual([{ code: "unsupported_key" }, { code: "unsupported_key" }, { code: "timeout" }]);
+  });
+
   it("lists local running and stopped VMs, matches QMP IDs/events, and requires an explicit multi-VM target", async () => {
     const f = await fixture();
     const info = await f.backend.inspect(context);
@@ -170,6 +203,14 @@ describe.runIf(process.platform === "linux")("PVE backend with real Python and U
       await expect(f.backend.act({ type: "text", text }, screen.display, context)).rejects.toMatchObject({ code: "unsupported_text" });
     }
     await expect(f.backend.act({ type: "key", keys: ["A; reboot"] }, screen.display, context)).rejects.toMatchObject({ code: "unsupported_key" });
+    expect(f.input).toHaveLength(0);
+  });
+
+  it("refuses a keyboard request whose deadline cannot cover the initial FIFO settle without sending input", async () => {
+    const f = await fixture();
+    const screen = await f.backend.screenshot("pve:101", context);
+    await expect(f.backend.act({ type: "key", keys: ["a"] }, screen.display, { timeoutMs: 250 }))
+      .rejects.toMatchObject({ code: "timeout" });
     expect(f.input).toHaveLength(0);
   });
 
@@ -275,6 +316,9 @@ describe("PVE provider admission", () => {
     expect(pveVmId("pve:101")).toBe(101);
     for (const value of ["pve:01", "pve:1", "pve:../101", "pve:101;reboot", "desktop"]) expect(() => pveVmId(value)).toThrow();
     expect(pveKeyChord(["Control", "Shift", "a"])).toEqual(["ctrl", "shift", "a"]);
+    expect(pveKeyChord(["Control", "Alt", "Shift", "Meta", "a"])).toEqual(["ctrl", "alt", "shift", "meta_l", "a"]);
+    expect(pveKeyChord(["Control", "Alt", "Shift", "Meta", "ArrowLeft"])).toEqual(["ctrl", "alt", "shift", "meta_l", "left"]);
+    expect(pveKeyChord(["Control", "Alt", "Shift", "Meta", "Pause"])).toEqual(["ctrl", "alt", "shift", "meta_l", "pause"]);
     expect(() => pveKeyChord(["Control", "ctrl"])).toThrow();
   });
 
@@ -309,6 +353,21 @@ describe("PVE provider admission", () => {
     for (const direction of ["left", "right"] as const) {
       await expect(backend.act({ type: "scroll", direction, amount: 3 }, target, context))
         .rejects.toMatchObject({ code: "unsupported_action", details: { mayHaveApplied: false } });
+    }
+    expect(runs).toBe(0);
+  });
+
+  it("rejects overflowing extended-key chords and seven-key rollover before invoking a helper", async () => {
+    let runs = 0;
+    const backend = createPveBackend({ uid: () => 0, find: names => names[0], run: async () => {
+      runs++;
+      throw new Error("A rejected keyboard chord must never invoke the helper");
+    } });
+    const target = { id: "pve:101", instanceId: "pve:101:fixture", x: 0, y: 0, width: 8, height: 6 };
+    for (const keys of [["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"],
+      ["a", "b", "c", "d", "e", "f", "g"]]) {
+      await expect(backend.act({ type: "key", keys }, target, context))
+        .rejects.toMatchObject({ code: "unsupported_key", details: { mayHaveApplied: false } });
     }
     expect(runs).toBe(0);
   });

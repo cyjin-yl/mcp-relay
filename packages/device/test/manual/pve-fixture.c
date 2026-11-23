@@ -24,6 +24,7 @@ static long sequence, key_down, key_up, clicks, releases, wheel_y, wheel_x;
 static int abs_x = -1, abs_y = -1, last_key = -1, device_count;
 static char typed[1024];
 static char boot_id[80];
+static char last_key_device[128];
 
 static const char plain[256] = {
   [KEY_A]='a', [KEY_B]='b', [KEY_C]='c', [KEY_D]='d', [KEY_E]='e',
@@ -62,7 +63,9 @@ static void json_text(char *out, size_t size, const char *text) {
 }
 static void render(void) {
   char escaped[sizeof(typed) * 2];
+  char escaped_device[sizeof(last_key_device) * 2];
   json_text(escaped, sizeof(escaped), typed);
+  json_text(escaped_device, sizeof(escaped_device), last_key_device);
   sequence++;
   dprintf(tty,
     "\033[?25l\033[H\033[2J\033[1;37;44m"
@@ -74,6 +77,7 @@ static void render(void) {
     " Typed text: %-60.60s\r\n"
     "\r\n"
     " Keys down / up: %-6ld / %-6ld    Last key code: %-5d\r\n"
+    " Keyboard source: %-60.60s\r\n"
     " Clicks / releases: %-6ld / %-6ld\r\n"
     " Pointer absolute X / Y: %-6d / %-6d  (0..32767)\r\n"
     " Scroll vertical / horizontal: %-6ld / %-6ld\r\n"
@@ -84,7 +88,7 @@ static void render(void) {
     " ASCII text appears without an implicit Enter.\r\n"
     "\r\n"
     " [ READ-ONLY RECEIPT ON SERIAL0 ]\r\n",
-    typed, key_down, key_up, last_key, clicks, releases, abs_x, abs_y,
+    typed, key_down, key_up, last_key, last_key_device, clicks, releases, abs_x, abs_y,
     wheel_y, wheel_x, device_count, sequence);
   if (abs_x >= 0 && abs_y >= 0) {
     int col = 1 + abs_x * 78 / 32767;
@@ -95,11 +99,11 @@ static void render(void) {
     "PVE_QA_STATE {\"fixture\":\"mcp-relay-cua-qa-019\",\"vmid\":990190,\"bootId\":\"%s\","
     "\"sequence\":%ld,\"devices\":%d,\"keyDown\":%ld,\"keyUp\":%ld,"
     "\"clicks\":%ld,\"releases\":%ld,\"x\":%d,\"y\":%d,"
-    "\"wheelY\":%ld,\"wheelX\":%ld,\"lastKey\":%d,\"text\":\"%s\"}\n",
+    "\"wheelY\":%ld,\"wheelX\":%ld,\"lastKey\":%d,\"lastKeyDevice\":\"%s\",\"text\":\"%s\"}\n",
     boot_id, sequence, device_count, key_down, key_up, clicks, releases, abs_x, abs_y,
-    wheel_y, wheel_x, last_key, escaped);
+    wheel_y, wheel_x, last_key, escaped_device, escaped);
 }
-static void input_event(struct input_event *event) {
+static void input_event(struct input_event *event, const char *device_name) {
   if (event->type == EV_ABS) {
     if (event->code == ABS_X) abs_x = event->value;
     if (event->code == ABS_Y) abs_y = event->value;
@@ -112,7 +116,10 @@ static void input_event(struct input_event *event) {
       if (event->value == 0) releases++;
       return;
     }
-    if (event->value == 1) key_down++;
+    if (event->value == 1) {
+      key_down++;
+      snprintf(last_key_device, sizeof(last_key_device), "%s", device_name);
+    }
     if (event->value == 0) key_up++;
     if (event->code == KEY_LEFTSHIFT || event->code == KEY_RIGHTSHIFT) {
       shift = event->value != 0;
@@ -156,7 +163,9 @@ int main(void) {
   }
   struct pollfd devices[32];
   char paths[32][128];
+  char names[32][128];
   memset(devices, 0, sizeof(devices));
+  memset(names, 0, sizeof(names));
   long long rescan_at = 0, draw_at = 0;
   for (;;) {
     long long now = monotonic_ms();
@@ -171,6 +180,8 @@ int main(void) {
           int fd = open(matches.gl_pathv[n], O_RDONLY | O_NONBLOCK);
           if (fd < 0) continue;
           snprintf(paths[device_count], sizeof(paths[device_count]), "%s", matches.gl_pathv[n]);
+          if (ioctl(fd, EVIOCGNAME(sizeof(names[device_count]) - 1), names[device_count]) < 0)
+            snprintf(names[device_count], sizeof(names[device_count]), "%s", matches.gl_pathv[n]);
           devices[device_count].fd = fd; devices[device_count].events = POLLIN; device_count++;
         }
       }
@@ -181,7 +192,7 @@ int main(void) {
       for (int i = 0; i < device_count; i++) if (devices[i].revents & POLLIN) {
         struct input_event event;
         while (read(devices[i].fd, &event, sizeof(event)) == sizeof(event)) {
-          input_event(&event); if (event.type != EV_SYN) changed = 1;
+          input_event(&event, names[i]); if (event.type != EV_SYN) changed = 1;
         }
       }
     }

@@ -22,7 +22,7 @@ type Wire = { type?: string; id?: string; ok?: boolean; result?: Result; error?:
 type Frame = { frame_id: string; display: ComputerDisplay & { instanceId?: string } };
 type Fixture = { fixture: string; vmid: number; sequence: number; devices: number; observed_at: number;
   keyDown: number; keyUp: number; clicks: number; releases: number; x: number; y: number;
-  wheelY: number; wheelX: number; lastKey: number; text: string };
+  wheelY: number; wheelX: number; lastKey: number; lastKeyDevice?: string; text: string };
 
 function data(result: Result): Record<string, unknown> {
   if (result.structuredContent) return result.structuredContent;
@@ -124,8 +124,9 @@ async function main(): Promise<void> {
   }
   async function act(action: ComputerAction | ((display: ComputerDisplay) => ComputerAction), tolerateBusy = false): Promise<void> {
     const shot = await frame(undefined, tolerateBusy);
+    const inputAction = typeof action === "function" ? action(shot.display) : action;
     const result = await call("computer_action", { request_id: randomUUID(), frame_id: shot.frame_id,
-      action: typeof action === "function" ? action(shot.display) : action, timeout_ms: 15000 });
+      action: inputAction, timeout_ms: inputAction.type === "text" ? 30000 : 15000 });
     assert.notEqual(result.isError, true, JSON.stringify(data(result)));
   }
   function pointerMatches(display: ComputerDisplay, x: number, y: number): boolean {
@@ -183,6 +184,11 @@ async function main(): Promise<void> {
       await act({ type: "text", text });
       await until(() => state().text === text && state().keyDown === state().keyUp, 5000, "guest typed text and released keys");
       assert.notEqual(state().lastKey, 28, "Text must not append Enter");
+      report.keyboardSource = state().lastKeyDevice;
+      if (process.env.MCP_RELAY_SMOKE_EXPECT_USB_KEYBOARD === "1") {
+        assert.match(state().lastKeyDevice ?? "", /USB.*Keyboard|Keyboard.*USB/i,
+          "The guest must prove the text arrived on its USB keyboard, not a fallback PS/2 keyboard");
+      }
     });
     await check("key chords and Backspace reach the guest keyboard", async () => {
       await act({ type: "key", keys: ["Backspace"] });

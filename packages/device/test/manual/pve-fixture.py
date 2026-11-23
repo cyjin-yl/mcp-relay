@@ -244,12 +244,53 @@ def rebuild(base):
     print(json.dumps({"rebuilt": True, "vmid": VMID, "initrd_bytes": archive.stat().st_size}))
 
 
+def keyboard_usb(base):
+    """Add a standard USB keyboard to this owned VM only, then reboot its UI."""
+    marker = verify_owned(base)
+    config = run([QM, "config", str(VMID), "--current", "1"])
+    values = dict(line.split(": ", 1) for line in config.splitlines() if ": " in line)
+    arguments = shlex.split(values.get("args", ""))
+    device = "usb-kbd,id=relayqa-keyboard"
+    if device not in arguments:
+        arguments.extend(["-device", device])
+        run([QM, "set", str(VMID), "--args", shlex.join(arguments)])
+    marker["keyboard_variant"] = "usb"
+    save(base / "owner.json", marker)
+    rebuild(base)
+
+
+def restart_observer(base):
+    """Restart the bounded own serial observer without changing VM state."""
+    marker = verify_owned(base)
+    old = marker.get("observer_pid")
+    if old and process_identity(old) == marker.get("observer_start_ticks"):
+        os.kill(old, signal.SIGTERM)
+    before = time.time()
+    with (base / "observer.log").open("ab") as log:
+        child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "observe", str(base)],
+                                 stdout=log, stderr=log, start_new_session=True,
+                                 env=dict(os.environ, TMPDIR=str(base / "tmp")))
+    marker.update({"observer_pid": child.pid, "observer_start_ticks": process_identity(child.pid)})
+    save(base / "owner.json", marker)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            if json.loads((base / "state.json").read_text())["observed_at"] > before:
+                print(json.dumps({"observer_restarted": True, "vmid": VMID, "remaining_seconds": 1800}))
+                return
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.1)
+    raise RuntimeError("The restarted own observer did not receive a fresh guest heartbeat")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("create", "observe", "rebuild", "remove"))
+    parser.add_argument("operation", choices=("create", "observe", "rebuild", "keyboard-usb", "restart-observer", "remove"))
     parser.add_argument("directory", type=Path)
     arguments = parser.parse_args()
     if os.geteuid() != 0:
         parser.error("Run this deliberate manual fixture command as root or sudo -n")
     directory = arguments.directory.resolve()
-    {"create": create, "observe": observe, "rebuild": rebuild, "remove": remove}[arguments.operation](directory)
+    {"create": create, "observe": observe, "rebuild": rebuild, "keyboard-usb": keyboard_usb,
+     "restart-observer": restart_observer, "remove": remove}[arguments.operation](directory)

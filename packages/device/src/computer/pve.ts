@@ -46,6 +46,8 @@ const aliases: Record<string, string> = {
   arrowup: "up", arrowdown: "down", arrowleft: "left", arrowright: "right",
   capslock: "caps_lock", numlock: "num_lock", scrolllock: "scroll_lock", printscreen: "print", pause: "pause"
 };
+const modifierKeys = new Set(["ctrl", "ctrl_r", "alt", "alt_r", "shift", "shift_r", "meta_l", "meta_r"]);
+const extendedKeys = new Set(["ctrl_r", "alt_r", "meta_l", "meta_r", "delete", "insert", "home", "end", "pgup", "pgdn", "up", "down", "left", "right", "print"]);
 
 export function pveKeyChord(keys: string[]): string[] {
   const mapped = keys.map(key => {
@@ -56,6 +58,13 @@ export function pveKeyChord(keys: string[]): string[] {
   });
   if (mapped.length < 1 || mapped.length > 8 || new Set(mapped).size !== mapped.length) {
     throw new ComputerError("unsupported_key", "A PVE chord must contain 1–8 distinct supported keys.");
+  }
+  // QEMU ui/input-keymap.c emits 1 ordinary, 2 extended or 3 Pause scan
+  // codes per edge. HID has 16 FIFO slots and six non-modifier rollover.
+  // Keep this conservative admission in sync with the isolated helper.
+  const scanCost = 2 * mapped.reduce((sum, key) => sum + (key === "pause" ? 3 : extendedKeys.has(key) ? 2 : 1), 0);
+  if (scanCost > 16 || mapped.filter(key => !modifierKeys.has(key)).length > 6) {
+    throw new ComputerError("unsupported_key", "This PVE key chord exceeds the guest keyboard's bounded FIFO or six-key rollover limit.", { mayHaveApplied: false });
   }
   return mapped;
 }
