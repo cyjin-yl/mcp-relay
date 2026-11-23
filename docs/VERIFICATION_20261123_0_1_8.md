@@ -13,11 +13,11 @@ This record distinguishes source/build checks, native OS acceptance, the public 
 
 ## Completed source/build checks
 
-The 2026-11-23 build passed TypeScript checking and all **156 tests in 21 files**. Coverage includes native process cancellation/output limits, cross-platform backend boundaries, screenshot-frame and request-ID constraints, persistent configuration revisions, real WebSocket image transport and handoff, and 25 supervisor tests.
+The 2026-11-23 build passed TypeScript checking and all **160 tests in 22 files**. Coverage includes native process cancellation/output limits, cross-platform backend boundaries, screenshot-frame and request-ID constraints, persistent configuration revisions, real WebSocket image transport and handoff, and 25 supervisor tests.
 
 Supervisor verification includes real forked workers: active-work drain, persistent-kernel deferral, candidate readiness, failure recovery, same-version local reload, startup request consumption, and the configuration revision A -> disable -> B race. A ready candidate for A cannot consume B.
 
-Six checks against the built standalone CLI passed: enable, pause preservation, resume, disable, sidecar permissions, and unchanged credential bytes.
+Six checks against the built standalone CLI passed: enable, pause preservation, resume, disable, sidecar permissions, and unchanged credential bytes. Native process lifecycle regressions also prove that an error from a process with a PID is not mistaken for exit; the UI transaction remains owned through real process termination.
 
 Linux native acceptance used an isolated Xvfb desktop and an owned Tk window. Native PNG dimensions (1024 x 768), Chinese and emoji text, keyboard chord, click, drag, scrolling, cancelled drag cleanup, and a fresh post-cancel screenshot passed. Unicode input needed an XTEST inter-key delay; the tested implementation uses 20 ms.
 
@@ -32,6 +32,8 @@ Native CI must bind its receipt to the exact final standalone CLI and harness di
 - In the second run, Windows PowerShell 7 verified runtime identity, screenshots, coordinates, Unicode, shortcuts, click, drag and scrolling. A post-cancellation screenshot encountered the still-held cleanup lock; its harness must wait in a bounded way using read-only observations and must never replay the action.
 - PowerShell 5.1 was observed as the actual child executable, but helper and version probes timed out. The timeout is an unresolved compatibility finding, not a native pass.
 - macOS display enumeration reached the native session checks with capture/input permissions granted. Its console-session dictionary key handling misclassified an available session; the resulting blocked receipt is not accepted as a genuine permission boundary or a UI pass.
+
+Third diagnostic run: https://github.com/cyjin-yl/mcp-relay/actions/runs/45228330569. Windows PowerShell 7 passed all 10 native cases using the actual 7.6.10 Core runtime. macOS confirmed the actual console-session key and granted permissions; its owned test window then exposed a JXA subclass signature mismatch in the fixture. PowerShell 5.1 timed out while downloading an artifact, before any native or startup diagnostic code ran. That download failure provides no new PowerShell compatibility result.
 
 **Stable client promotion remains pending a corrected native acceptance run.** The stable channel is still 0.1.7 at the time of this record. Candidate upload alone does not publish 0.1.8.
 

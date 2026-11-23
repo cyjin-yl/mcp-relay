@@ -79,6 +79,45 @@ jobs:
             harness_url: process.env.INPUT_HARNESS_URL,
             harness_sha256: process.env.INPUT_HARNESS_SHA256,
           } : JSON.parse(readFileSync('.github/computer-native-candidate.json', 'utf8'));
+          async function downloadArtifact(url, limit, timeoutMs) {
+            const networkCodes = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE',
+              'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
+            function networkError(error) {
+              if (!error || typeof error !== 'object') return false;
+              if (networkCodes.has(error.code)) return true;
+              if (Array.isArray(error.errors) && error.errors.length) return error.errors.every(networkError);
+              return error.cause ? networkError(error.cause) : false;
+            }
+            for (let attempt = 1; attempt <= 2; attempt++) {
+              const signal = AbortSignal.timeout(timeoutMs);
+              try {
+                const response = await fetch(url, { redirect: 'error', signal });
+                if (!response.ok) {
+                  if (response.body) await response.body.cancel().catch(() => undefined);
+                  const error = new Error('Artifact fetch failed: ' + response.status);
+                  error.retryable = response.status === 429 || (response.status >= 500 && response.status <= 599);
+                  throw error;
+                }
+                const reader = response.body.getReader(), parts = []; let bytes = 0;
+                for (;;) {
+                  const chunk = await reader.read(); if (chunk.done) break;
+                  bytes += chunk.value.length;
+                  if (bytes > limit) {
+                    await reader.cancel().catch(() => undefined);
+                    const error = new Error('Artifact exceeds size limit'); error.retryable = false; throw error;
+                  }
+                  parts.push(chunk.value);
+                }
+                return Buffer.concat(parts);
+              } catch (error) {
+                const retryable = error.retryable !== false && (error.retryable === true ||
+                  (signal.aborted && signal.reason?.name === 'TimeoutError') || networkError(error));
+                if (attempt === 2 || !retryable) throw error;
+                console.warn('Transient artifact download failure; one retry after 1 second.');
+                await new Promise(resolve => setTimeout(resolve, 1000));
+              }
+            }
+          }
           const verified = {};
           for (const [kind, filename] of [['bundle', 'cli.cjs'], ['harness', 'computer-native-smoke.cjs']]) {
             const sha = String(config[kind + '_sha256'] ?? '').toLowerCase();
@@ -86,15 +125,7 @@ jobs:
             const url = new URL(config[kind + '_url']);
             if (url.origin !== 'https://relay.cyjin.dev' || !url.pathname.startsWith('/updates/device/') || url.username || url.password || url.search || url.hash)
               throw new Error('Candidate URL must be an immutable relay.cyjin.dev update artifact');
-            const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(60000) });
-            if (!response.ok) throw new Error('Artifact fetch failed: ' + response.status);
-            const reader = response.body.getReader(), parts = []; let bytes = 0;
-            for (;;) { const chunk = await reader.read(); if (chunk.done) break;
-              bytes += chunk.value.length;
-              if (bytes > 16 * 1024 * 1024) { await reader.cancel(); throw new Error('Artifact exceeds size limit'); }
-              parts.push(chunk.value);
-            }
-            const body = Buffer.concat(parts);
+            const body = await downloadArtifact(url, 16 * 1024 * 1024, 60000);
             if (createHash('sha256').update(body).digest('hex') !== sha) throw new Error('Artifact SHA256 mismatch: ' + kind);
             const destination = join(root, filename); writeFileSync(destination, body);
             const syntax = spawnSync(process.execPath, ['--check', destination], { encoding: 'utf8' });
@@ -118,15 +149,50 @@ jobs:
           const evidence = join(root, 'startup-diagnostic'); mkdirSync(evidence, { recursive: true });
           const url = 'https://relay.cyjin.dev/updates/device/candidates/a4b45084441464109eca15f1ca41394944b5cae9dcd57def2a2e4a5d6551123c/windows-native-startup-diagnostic-81d7f3c209edafbd5ed7ac05acfbb8dcf19b59bdaf8dc7a59c189e076e2fd941.cjs';
           const sha = '81d7f3c209edafbd5ed7ac05acfbb8dcf19b59bdaf8dc7a59c189e076e2fd941';
-          const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(30000) });
-          if (!response.ok) throw new Error('Diagnostic fetch failed: ' + response.status);
-          const reader = response.body.getReader(), parts = []; let bytes = 0;
-          for (;;) { const chunk = await reader.read(); if (chunk.done) break;
-            bytes += chunk.value.length;
-            if (bytes > 1024 * 1024) { await reader.cancel(); throw new Error('Diagnostic exceeds size limit'); }
-            parts.push(chunk.value);
+          async function downloadArtifact(url, limit, timeoutMs) {
+            const networkCodes = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE',
+              'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
+            function networkError(error) {
+              if (!error || typeof error !== 'object') return false;
+              if (networkCodes.has(error.code)) return true;
+              if (Array.isArray(error.errors) && error.errors.length) return error.errors.every(networkError);
+              return error.cause ? networkError(error.cause) : false;
+            }
+            for (let attempt = 1; attempt <= 2; attempt++) {
+              const signal = AbortSignal.timeout(timeoutMs);
+              try {
+                const response = await fetch(url, { redirect: 'error', signal });
+                if (!response.ok) {
+                  if (response.body) await response.body.cancel().catch(() => undefined);
+                  const error = new Error('Artifact fetch failed: ' + response.status);
+                  error.retryable = response.status === 429 || (response.status >= 500 && response.status <= 599);
+                  throw error;
+                }
+                const reader = response.body.getReader(), parts = []; let bytes = 0;
+                for (;;) {
+                  const chunk = await reader.read(); if (chunk.done) break;
+                  bytes += chunk.value.length;
+                  if (bytes > limit) {
+                    await reader.cancel().catch(() => undefined);
+                    const error = new Error('Artifact exceeds size limit'); error.retryable = false; throw error;
+                  }
+                  parts.push(chunk.value);
+                }
+                return Buffer.concat(parts);
+              } catch (error) {
+                const retryable = error.retryable !== false && (error.retryable === true ||
+                  (signal.aborted && signal.reason?.name === 'TimeoutError') || networkError(error));
+                if (attempt === 2 || !retryable) throw error;
+                console.warn('Transient artifact download failure; one retry after 1 second.');
+                await new Promise(resolve => setTimeout(resolve, 1000));
+              }
+            }
           }
-          const body = Buffer.concat(parts);
+          const safeUrl = new URL(url);
+          if (safeUrl.origin !== 'https://relay.cyjin.dev' || !safeUrl.pathname.startsWith('/updates/device/') || safeUrl.username || safeUrl.password || safeUrl.search || safeUrl.hash)
+            throw new Error('Diagnostic URL must be an immutable relay.cyjin.dev update artifact');
+          const body = await downloadArtifact(safeUrl, 1024 * 1024, 30000);
+          const bytes = body.length;
           if (createHash('sha256').update(body).digest('hex') !== sha) throw new Error('Diagnostic SHA256 mismatch');
           const executable = join(root, 'windows-native-startup-diagnostic.cjs'); writeFileSync(executable, body);
           writeFileSync(join(evidence, 'artifact-provenance.json'), JSON.stringify({ url, sha256: sha, bytes }, null, 2) + '\n');

@@ -99,13 +99,15 @@ var clicks=0,drags=0,scrolls=0,moves=0,held=false,moved=false;
 ObjC.registerSubclass({name:'RelaySmokeTarget',superclass:'NSObject',methods:{
  'clicked:':{types:['void',['id']],implementation:function(sender){clicks++;}}
 }});
+// Inherit the actual AppKit method encodings (BOOL differs by architecture).
+// JXA permits omitted types for overrides; custom selectors still declare them.
 ObjC.registerSubclass({name:'RelaySmokeCanvas',superclass:'NSView',methods:{
- 'acceptsFirstResponder':{types:['bool',[]],implementation:function(){return true;}},
- 'mouseDown:':{types:['void',['id']],implementation:function(event){held=true;moved=false;this.window.makeFirstResponder(this);}},
- 'mouseDragged:':{types:['void',['id']],implementation:function(event){moves++;moved=true;}},
- 'mouseUp:':{types:['void',['id']],implementation:function(event){if(held&&moved)drags++;held=false;}},
- 'scrollWheel:':{types:['void',['id']],implementation:function(event){scrolls++;}},
- 'drawRect:':{types:['void',['NSRect']],implementation:function(rect){$.NSColor.colorWithCalibratedRedGreenBlueAlpha(0.12,0.51,0.70,1).set;$.NSRectFill(rect);}}
+ 'acceptsFirstResponder':function(){return true;},
+ 'mouseDown:':function(event){held=true;moved=false;this.window.makeFirstResponder(this);},
+ 'mouseDragged:':function(event){moves++;moved=true;},
+ 'mouseUp:':function(event){if(held&&moved)drags++;held=false;},
+ 'scrollWheel:':function(event){scrolls++;},
+ 'drawRect:':function(rect){$.NSColor.colorWithCalibratedRedGreenBlueAlpha(0.12,0.51,0.70,1).set;$.NSRectFill(rect);}
 }});
 var app=$.NSApplication.sharedApplication;
 app.setActivationPolicy(0);
