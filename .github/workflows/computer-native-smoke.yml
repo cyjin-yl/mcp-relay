@@ -1,0 +1,343 @@
+name: Native computer capability (prebuilt)
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_url:
+        description: Immutable standalone candidate URL
+        required: true
+        type: string
+      bundle_sha256:
+        description: Expected standalone candidate SHA256
+        required: true
+        type: string
+      harness_url:
+        description: Immutable prebuilt native harness URL
+        required: true
+        type: string
+      harness_sha256:
+        description: Expected native harness SHA256
+        required: true
+        type: string
+      run_startup_diagnostic:
+        description: Run the preserved pre-fix PowerShell startup diagnostic (read-only)
+        required: false
+        type: boolean
+        default: false
+      run_macos_event_diagnostic:
+        description: Run the preserved pre-fix macOS no-input event diagnostic (read-only)
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: [feat/computer-use-20261123, feat/pve-computer-use-0.1.9]
+    paths:
+      - .github/workflows/computer-native-smoke.yml
+      - .github/computer-native-candidate.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-computer-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    name: Native UI / ${{ matrix.os }} / ${{ matrix.runtime }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            runtime: pwsh7
+            powershell: '7'
+          - os: windows-latest
+            runtime: powershell51
+            powershell: '5.1'
+          - os: macos-15
+            runtime: system
+            powershell: ''
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Download frozen prebuilt artifacts and check SHA256
+        shell: bash
+        env:
+          INPUT_BUNDLE_URL: ${{ inputs.bundle_url }}
+          INPUT_BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+          INPUT_HARNESS_URL: ${{ inputs.harness_url }}
+          INPUT_HARNESS_SHA256: ${{ inputs.harness_sha256 }}
+          MCP_RELAY_SMOKE_POWERSHELL: ${{ matrix.powershell }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { spawnSync } from 'node:child_process';
+          const root = join(process.env.RUNNER_TEMP, 'relay-computer-native');
+          mkdirSync(root, { recursive: true });
+          const manual = Boolean(process.env.INPUT_BUNDLE_URL);
+          const config = manual ? {
+            bundle_url: process.env.INPUT_BUNDLE_URL,
+            bundle_sha256: process.env.INPUT_BUNDLE_SHA256,
+            harness_url: process.env.INPUT_HARNESS_URL,
+            harness_sha256: process.env.INPUT_HARNESS_SHA256,
+          } : JSON.parse(readFileSync('.github/computer-native-candidate.json', 'utf8'));
+          async function downloadArtifact(url, limit, timeoutMs) {
+            const networkCodes = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE',
+              'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
+            function networkError(error) {
+              if (!error || typeof error !== 'object') return false;
+              if (networkCodes.has(error.code)) return true;
+              if (Array.isArray(error.errors) && error.errors.length) return error.errors.every(networkError);
+              return error.cause ? networkError(error.cause) : false;
+            }
+            for (let attempt = 1; attempt <= 2; attempt++) {
+              const signal = AbortSignal.timeout(timeoutMs);
+              try {
+                const response = await fetch(url, { redirect: 'error', signal });
+                if (!response.ok) {
+                  if (response.body) await response.body.cancel().catch(() => undefined);
+                  const error = new Error('Artifact fetch failed: ' + response.status);
+                  error.retryable = response.status === 429 || (response.status >= 500 && response.status <= 599);
+                  throw error;
+                }
+                const reader = response.body.getReader(), parts = []; let bytes = 0;
+                for (;;) {
+                  const chunk = await reader.read(); if (chunk.done) break;
+                  bytes += chunk.value.length;
+                  if (bytes > limit) {
+                    await reader.cancel().catch(() => undefined);
+                    const error = new Error('Artifact exceeds size limit'); error.retryable = false; throw error;
+                  }
+                  parts.push(chunk.value);
+                }
+                return Buffer.concat(parts);
+              } catch (error) {
+                const retryable = error.retryable !== false && (error.retryable === true ||
+                  (signal.aborted && signal.reason?.name === 'TimeoutError') || networkError(error));
+                if (attempt === 2 || !retryable) throw error;
+                console.warn('Transient artifact download failure; one retry after 1 second.');
+                await new Promise(resolve => setTimeout(resolve, 1000));
+              }
+            }
+          }
+          const ciValue = name => /^\d+$/.test(process.env[name] ?? '') ? process.env[name] : null;
+          const verified = { ciRunId: ciValue('GITHUB_RUN_ID'), ciRunAttempt: ciValue('GITHUB_RUN_ATTEMPT'),
+            platform: process.platform, powerShellSelector: process.env.MCP_RELAY_SMOKE_POWERSHELL || null };
+          for (const [kind, filename] of [['bundle', 'cli.cjs'], ['harness', 'computer-native-smoke.cjs']]) {
+            const sha = String(config[kind + '_sha256'] ?? '').toLowerCase();
+            if (!/^[a-f0-9]{64}$/.test(sha)) throw new Error('Invalid SHA256: ' + kind);
+            const url = new URL(config[kind + '_url']);
+            if (url.origin !== 'https://relay.cyjin.dev' || !url.pathname.startsWith('/updates/device/') || url.username || url.password || url.search || url.hash)
+              throw new Error('Candidate URL must be an immutable relay.cyjin.dev update artifact');
+            const body = await downloadArtifact(url, 16 * 1024 * 1024, 60000);
+            if (createHash('sha256').update(body).digest('hex') !== sha) throw new Error('Artifact SHA256 mismatch: ' + kind);
+            const destination = join(root, filename); writeFileSync(destination, body);
+            const syntax = spawnSync(process.execPath, ['--check', destination], { encoding: 'utf8' });
+            if (syntax.status !== 0) throw new Error('Prebuilt JavaScript syntax failed: ' + kind + '\n' + syntax.stderr);
+            verified[kind] = { url: url.toString(), sha256: sha, bytes: body.length };
+          }
+          writeFileSync(join(root, 'artifact-provenance.json'), JSON.stringify(verified, null, 2) + '\n');
+          NODE
+      - name: Diagnose system PowerShell startup with a frozen read-only probe
+        if: github.event_name == 'workflow_dispatch' && inputs.run_startup_diagnostic && matrix.runtime == 'powershell51'
+        timeout-minutes: 5
+        continue-on-error: true
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { mkdirSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { spawnSync } from 'node:child_process';
+          const root = join(process.env.RUNNER_TEMP, 'relay-computer-native');
+          const evidence = join(root, 'startup-diagnostic'); mkdirSync(evidence, { recursive: true });
+          const url = 'https://relay.cyjin.dev/updates/device/candidates/9ed362e43466f4d9626e7c5be325aff5ba63713360241c76d584a2ff9a78a495/windows-native-startup-diagnostic-56414cc90a7114540285bd566edc26539812b66a9fa15216e40606940c974f93.cjs';
+          const sha = '56414cc90a7114540285bd566edc26539812b66a9fa15216e40606940c974f93';
+          async function downloadArtifact(url, limit, timeoutMs) {
+            const networkCodes = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE',
+              'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
+            function networkError(error) {
+              if (!error || typeof error !== 'object') return false;
+              if (networkCodes.has(error.code)) return true;
+              if (Array.isArray(error.errors) && error.errors.length) return error.errors.every(networkError);
+              return error.cause ? networkError(error.cause) : false;
+            }
+            for (let attempt = 1; attempt <= 2; attempt++) {
+              const signal = AbortSignal.timeout(timeoutMs);
+              try {
+                const response = await fetch(url, { redirect: 'error', signal });
+                if (!response.ok) {
+                  if (response.body) await response.body.cancel().catch(() => undefined);
+                  const error = new Error('Artifact fetch failed: ' + response.status);
+                  error.retryable = response.status === 429 || (response.status >= 500 && response.status <= 599);
+                  throw error;
+                }
+                const reader = response.body.getReader(), parts = []; let bytes = 0;
+                for (;;) {
+                  const chunk = await reader.read(); if (chunk.done) break;
+                  bytes += chunk.value.length;
+                  if (bytes > limit) {
+                    await reader.cancel().catch(() => undefined);
+                    const error = new Error('Artifact exceeds size limit'); error.retryable = false; throw error;
+                  }
+                  parts.push(chunk.value);
+                }
+                return Buffer.concat(parts);
+              } catch (error) {
+                const retryable = error.retryable !== false && (error.retryable === true ||
+                  (signal.aborted && signal.reason?.name === 'TimeoutError') || networkError(error));
+                if (attempt === 2 || !retryable) throw error;
+                console.warn('Transient artifact download failure; one retry after 1 second.');
+                await new Promise(resolve => setTimeout(resolve, 1000));
+              }
+            }
+          }
+          const safeUrl = new URL(url);
+          if (safeUrl.origin !== 'https://relay.cyjin.dev' || !safeUrl.pathname.startsWith('/updates/device/') || safeUrl.username || safeUrl.password || safeUrl.search || safeUrl.hash)
+            throw new Error('Diagnostic URL must be an immutable relay.cyjin.dev update artifact');
+          const body = await downloadArtifact(safeUrl, 1024 * 1024, 30000);
+          const bytes = body.length;
+          if (createHash('sha256').update(body).digest('hex') !== sha) throw new Error('Diagnostic SHA256 mismatch');
+          const executable = join(root, 'windows-native-startup-diagnostic.cjs'); writeFileSync(executable, body);
+          writeFileSync(join(evidence, 'artifact-provenance.json'), JSON.stringify({ url, sha256: sha, bytes }, null, 2) + '\n');
+          const syntax = spawnSync(process.execPath, ['--check', executable], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+          if (syntax.status !== 0) throw new Error('Prebuilt diagnostic JavaScript syntax failed: ' + syntax.stderr);
+          const result = spawnSync(process.execPath, [executable, evidence], {
+            timeout: 130000, encoding: 'utf8', maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+          });
+          writeFileSync(join(evidence, 'stdout.log'), result.stdout ?? '');
+          writeFileSync(join(evidence, 'stderr.log'), result.stderr ?? '');
+          if (result.error) throw result.error;
+          if (result.status !== 0) throw new Error('Diagnostic exited ' + result.status + '; native UI acceptance still runs independently.');
+          NODE
+      - name: Diagnose macOS event bridge without posting input
+        if: github.event_name == 'workflow_dispatch' && inputs.run_macos_event_diagnostic && matrix.os == 'macos-15'
+        timeout-minutes: 2
+        continue-on-error: true
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { mkdirSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { spawnSync } from 'node:child_process';
+          const root = join(process.env.RUNNER_TEMP, 'relay-computer-native');
+          const evidence = join(root, 'native-event-diagnostic'); mkdirSync(evidence, { recursive: true });
+          const url = new URL('https://relay.cyjin.dev/updates/device/candidates/bb2b87e32a59647de53233db73cd3015f7adde59e7c885221daf25ed9cc3ca84/macos-native-event-diagnostic-f43c5b963f20d865110819ba6a47d54b67e6dcb4729219c000d82079a00653b0.cjs');
+          const sha = 'f43c5b963f20d865110819ba6a47d54b67e6dcb4729219c000d82079a00653b0';
+          async function downloadArtifact(url, limit, timeoutMs) {
+            const networkCodes = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE',
+              'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
+            function networkError(error) {
+              if (!error || typeof error !== 'object') return false;
+              if (networkCodes.has(error.code)) return true;
+              if (Array.isArray(error.errors) && error.errors.length) return error.errors.every(networkError);
+              return error.cause ? networkError(error.cause) : false;
+            }
+            for (let attempt = 1; attempt <= 2; attempt++) {
+              const signal = AbortSignal.timeout(timeoutMs);
+              try {
+                const response = await fetch(url, { redirect: 'error', signal });
+                if (!response.ok) {
+                  if (response.body) await response.body.cancel().catch(() => undefined);
+                  const error = new Error('Artifact fetch failed: ' + response.status);
+                  error.retryable = response.status === 429 || (response.status >= 500 && response.status <= 599);
+                  throw error;
+                }
+                const reader = response.body.getReader(), parts = []; let bytes = 0;
+                for (;;) {
+                  const chunk = await reader.read(); if (chunk.done) break;
+                  bytes += chunk.value.length;
+                  if (bytes > limit) {
+                    await reader.cancel().catch(() => undefined);
+                    const error = new Error('Artifact exceeds size limit'); error.retryable = false; throw error;
+                  }
+                  parts.push(chunk.value);
+                }
+                return Buffer.concat(parts);
+              } catch (error) {
+                const retryable = error.retryable !== false && (error.retryable === true ||
+                  (signal.aborted && signal.reason?.name === 'TimeoutError') || networkError(error));
+                if (attempt === 2 || !retryable) throw error;
+                console.warn('Transient artifact download failure; one retry after 1 second.');
+                await new Promise(resolve => setTimeout(resolve, 1000));
+              }
+            }
+          }
+          if (url.origin !== 'https://relay.cyjin.dev' || !url.pathname.startsWith('/updates/device/') || url.username || url.password || url.search || url.hash)
+            throw new Error('Diagnostic URL must be an immutable relay.cyjin.dev update artifact');
+          const body = await downloadArtifact(url, 1024 * 1024, 30000);
+          if (createHash('sha256').update(body).digest('hex') !== sha) throw new Error('Diagnostic SHA256 mismatch');
+          const executable = join(root, 'macos-native-event-diagnostic.cjs'); writeFileSync(executable, body);
+          writeFileSync(join(evidence, 'artifact-provenance.json'), JSON.stringify({ url: url.toString(), sha256: sha, bytes: body.length }, null, 2) + '\n');
+          const syntax = spawnSync(process.execPath, ['--check', executable], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+          if (syntax.status !== 0) throw new Error('Prebuilt diagnostic syntax check failed: ' + syntax.stderr);
+          const result = spawnSync(process.execPath, [executable, evidence], {
+            timeout: 40000, encoding: 'utf8', maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+          });
+          writeFileSync(join(evidence, 'stdout.log'), result.stdout ?? '');
+          writeFileSync(join(evidence, 'stderr.log'), result.stderr ?? '');
+          if (result.error) throw result.error;
+          if (result.status !== 0) throw new Error('No-input diagnostic exited ' + result.status + '; native GUI acceptance remains a separate gate.');
+          NODE
+      - name: Run actual CLI against owned native test window
+        shell: bash
+        env:
+          MCP_RELAY_SMOKE_POWERSHELL: ${{ matrix.powershell }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { spawnSync } from 'node:child_process';
+          const root = join(process.env.RUNNER_TEMP, 'relay-computer-native');
+          const evidence = join(root, 'evidence'); mkdirSync(evidence, { recursive: true });
+          const result = spawnSync(process.execPath, [join(root, 'computer-native-smoke.cjs'), join(root, 'cli.cjs'), evidence], {
+            timeout: 420000, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, env: process.env,
+          });
+          writeFileSync(join(root, 'harness.stdout.log'), result.stdout ?? '');
+          writeFileSync(join(root, 'harness.stderr.log'), result.stderr ?? '');
+          if (result.error) throw result.error;
+          const receipt = JSON.parse(readFileSync(join(evidence, 'acceptance.json'), 'utf8'));
+          const provenance = JSON.parse(readFileSync(join(root, 'artifact-provenance.json'), 'utf8'));
+          assert.equal(receipt.bundleSha256, provenance.bundle.sha256);
+          assert.equal(receipt.harnessSha256, provenance.harness.sha256);
+          assert.equal(receipt.ciRunId, provenance.ciRunId); assert.equal(receipt.ciRunAttempt, provenance.ciRunAttempt);
+          assert.equal(provenance.ciRunId, process.env.GITHUB_RUN_ID); assert.equal(provenance.ciRunAttempt, process.env.GITHUB_RUN_ATTEMPT);
+          assert.equal(provenance.platform, process.platform);
+          assert.equal(provenance.powerShellSelector, process.env.MCP_RELAY_SMOKE_POWERSHELL || null);
+          assert.equal(receipt.platform, process.platform);
+          const title = process.platform === 'win32' ? 'Windows' : 'macOS';
+          if (result.status === 77 && receipt.status === 'blocked') {
+            assert.equal(receipt.passed, false); assert.equal(receipt.uiVerified, false);
+            assert(receipt.cases.some(item => item.passed && item.name.includes('permission blocker')));
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+              '## ' + title + ': capability unavailable\n\nThe native OS/session or permission boundary refused capture/input. No full desktop UI pass is claimed. See acceptance.json for exact permissions and the refused operation.\n');
+            console.log(JSON.stringify({ status: 'capability-unavailable', permissions: receipt.capabilities?.permissions, reason: receipt.capabilities?.reason }));
+            if (process.platform === 'win32') throw new Error('Windows native desktop acceptance requires an interactive UI pass; the runner reported blocked.');
+          } else {
+            assert.equal(result.status, 0, result.stdout + '\n' + result.stderr);
+            assert.equal(receipt.status, 'passed'); assert.equal(receipt.passed, true); assert.equal(receipt.uiVerified, true);
+            assert(receipt.cases.every(item => item.passed));
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+              '## ' + title + ': native UI verified\n\n' + receipt.cases.map(item => '- ' + item.name).join('\n') + '\n');
+            console.log(JSON.stringify({ status: 'native-ui-passed', cases: receipt.cases.length, backend: receipt.capabilities?.backend }));
+          }
+          NODE
+      - name: Upload native receipts and evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-computer-${{ matrix.os }}-${{ matrix.runtime }}
+          path: ${{ runner.temp }}/relay-computer-native/
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,198 @@
+import { createHash } from "node:crypto";
+import { describe, expect, it } from "vitest";
+import {
+  ANDROID_INPUT_METHOD, createAndroidBackend, parseAndroidGeometry, parseAndroidApp, parseAndroidLock, androidKeyCode
+} from "../src/computer/android.js";
+import { ComputerError, type NativeCommand, type NativeContext, type NativeResult } from "../src/computer/types.js";
+
+const artifact = Buffer.alloc(1400, 90);
+const bridge = { version: "0.1.0", versionCode: 1, sha256: createHash("sha256").update(artifact).digest("hex"), base64: artifact.toString("base64") };
+const context: NativeContext = { timeoutMs: 30000 };
+const display = { id: "0", x: 0, y: 0, width: 1200, height: 2000, scaleX: 1, scaleY: 1, rotation: 0 };
+const ok = (stdout = "", exitCode = 0): NativeResult => ({ stdout: Buffer.from(stdout), stderr: Buffer.alloc(0), exitCode });
+
+function probe(installed = true, combo = true, real = "1200 x 2000", rotation = 0, selected = "org.example.keyboard/.Ime", policy = "KeyguardServiceDelegate\n  showing=false\n  inputRestricted=false", power = "mWakefulness=Awake") {
+  const fields: Record<string, string> = {
+    uid: "0", sdk: "34", user: "0", timeout: "yes", input: "yes", capture: "yes",
+    input_help: "tap swipe motionevent keyevent" + (combo ? " keycombination" : ""),
+    display: 'mDisplayInfo=DisplayInfo{"Built-in Screen", displayId 0, real ' + real + ", rotation " + rotation + ", type BUILT_IN}",
+    window: "mCurrentFocus=Window{11 u0 dev.cyjin.mcprelay.input/.ProbeActivity}",
+    policy, power, size: "Physical size: 1200x2000", ime_selected: selected, ime_enabled: "org.example.keyboard/.Ime",
+    bridge_sha: installed ? bridge.sha256 + " /data/app/bridge/base.apk" : ""
+  };
+  return Object.entries(fields).map(([key, value]) => "__RELAY_ANDROID_" + key + "__\n" + value).join("\n") + "\n";
+}
+function png(): Buffer {
+  const value = Buffer.alloc(33);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(value);
+  value.writeUInt32BE(13, 8); value.write("IHDR", 12, "ascii");
+  value.writeUInt32BE(1200, 16); value.writeUInt32BE(2000, 20);
+  return value;
+}
+function requestId(spec: NativeCommand): string {
+  const match = /__RELAY_IME_RESTORED__([a-f0-9]{32})/.exec(String(spec.input));
+  if (!match) throw new Error("request marker absent");
+  return match[1]!;
+}
+function fixture(options: {
+  installed?: boolean; combo?: boolean; real?: string; rotation?: number; policy?: string; power?: string;
+  act?: (spec: NativeCommand, index: number) => Promise<NativeResult> | NativeResult;
+} = {}) {
+  const calls: NativeCommand[] = [];
+  let installed = options.installed ?? true, clock = 0, actionIndex = 0;
+  const waits: number[] = [];
+  const backend = createAndroidBackend({
+    find: () => "/system/xbin/su", bridge, now: () => clock,
+    sleep: async ms => { waits.push(ms); clock += ms; },
+    run: async spec => {
+      calls.push(spec);
+      if (typeof spec.input === "string" && spec.input.includes("__RELAY_ANDROID_uid__")) {
+        return ok(probe(installed, options.combo, options.real, options.rotation, undefined, options.policy, options.power));
+      }
+      if (spec.args[1]?.includes("/system/bin/screencap -p")) return { stdout: png(), stderr: Buffer.alloc(0), exitCode: 0 };
+      if (Buffer.isBuffer(spec.input)) {
+        expect(spec.input.equals(artifact)).toBe(true);
+        installed = true;
+        return ok("Success\n");
+      }
+      if (options.act) return options.act(spec, actionIndex++);
+      if (String(spec.input).includes("__RELAY_IME_RESTORED__")) {
+        const request = requestId(spec);
+        return ok('Broadcast completed: result=-1, data="relay-input:' + request + ':ok"\n__RELAY_IME_RESTORED__' + request + ":1\n");
+      }
+      return ok();
+    }
+  });
+  return { backend, calls, waits };
+}
+
+describe("Android display and input metadata", () => {
+  it("takes the primary real display dimensions and rotation", () => {
+    const text = 'DisplayInfo{"External", displayId 2, real 900 x 600, rotation 0}\n'
+      + 'mDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 2000 x 1200, rotation 1}';
+    expect(parseAndroidGeometry(text, "", "")).toEqual({ width: 2000, height: 1200, rotation: 1, source: "display-info" });
+  });
+  it("uses the rotated wm override only with an observed rotation", () => {
+    expect(parseAndroidGeometry("", "mRotation=ROTATION_90", "Physical size: 1200x2000\nOverride size: 600x1000"))
+      .toEqual({ width: 1000, height: 600, rotation: 1, source: "wm-size" });
+    expect(parseAndroidGeometry("", "", "Physical size: 1200x2000")).toBeUndefined();
+  });
+  it("extracts only the focused component rather than window text", () => {
+    expect(parseAndroidApp("mCurrentFocus=Window{abc u0 com.example/.Editor}")).toEqual({ id: "com.example/.Editor", title: "com.example" });
+    expect(parseAndroidApp("mCurrentFocus=null")).toBeUndefined();
+  });
+  it("maps explicit key aliases and refuses arbitrary native arguments", () => {
+    expect(androidKeyCode("Control")).toBe("KEYCODE_CTRL_LEFT");
+    expect(androidKeyCode("ArrowLeft")).toBe("KEYCODE_DPAD_LEFT");
+    expect(() => androidKeyCode("A; reboot")).toThrow(ComputerError);
+  });
+});
+
+describe("Android computer backend", () => {
+  it("recognizes keyguard state without treating secure capability as a lock", () => {
+    expect(parseAndroidLock("KeyguardServiceDelegate\n  showing=true\n  occluded=true", "mWakefulness=Awake").locked).toBe(true);
+    expect(parseAndroidLock("mShowingLockscreen=false", "mWakefulness=Awake")).toMatchObject({ locked: false, interactive: true });
+    expect(parseAndroidLock("secure=true\nvendorSpecificStatus=7", "vendorAwake=1")).toMatchObject({ locked: undefined, interactive: undefined });
+  });
+  it("blocks input on a known locked device and reports unavailable", async () => {
+    const test = fixture({ policy: "mKeyguardShowing=true" });
+    const info = await test.backend.inspect(context);
+    expect(info).toMatchObject({ available: false, actions: [], details: { locked: true } });
+    await expect(test.backend.act({ type: "click", x: 5, y: 5 }, display, context)).rejects.toMatchObject({ code: "android_locked", details: { mayHaveApplied: false } });
+    expect(test.calls.some(call => String(call.input).includes("'tap'"))).toBe(false);
+  });
+  it("does not wake a sleeping device with a synthetic key", async () => {
+    const test = fixture({ power: "mWakefulness=Asleep" });
+    await expect(test.backend.act({ type: "key", keys: ["HOME"] }, display, context)).rejects.toMatchObject({ code: "android_not_interactive" });
+    expect(test.calls.some(call => String(call.input).includes("'keyevent'"))).toBe(false);
+  });
+  it("reports unrecognized OEM lock state as unknown", async () => {
+    const test = fixture({ policy: "OEM_POLICY_UNRECOGNIZED=1", power: "OEM_POWER_UNRECOGNIZED=1" });
+    expect(await test.backend.inspect(context)).toMatchObject({ details: { locked: "unknown", interactive: "unknown" }, permissions: { unlockedSession: "unknown" } });
+  });
+  it("inspects and captures without installing or enabling an IME", async () => {
+    const test = fixture({ installed: false });
+    const info = await test.backend.inspect(context);
+    expect(info.available).toBe(true);
+    expect(info.unicodeText).toBe(false);
+    expect(info.inputKind).toBe("touch");
+    expect(info.displays[0]?.width).toBe(1200);
+    expect(test.calls.every(call => !Buffer.isBuffer(call.input))).toBe(true);
+    expect(test.calls.some(call => /ime (?:enable|set|disable)\b/.test(String(call.input)))).toBe(false);
+  });
+  it("installs only the hash-verified bundled APK during explicit setup", async () => {
+    const test = fixture({ installed: false });
+    expect(await test.backend.setup!(context)).toMatchObject({ installed: true, changed: true, sha256: bridge.sha256, inputMethodChanged: false });
+    const install = test.calls.find(call => Buffer.isBuffer(call.input))!;
+    expect(install.args[1]).toContain("timeout");
+    expect(install.args[1]).toContain("'install' '-r' '--user' '0'");
+    const second = await test.backend.setup!(context);
+    expect(second).toMatchObject({ installed: true, changed: false });
+    expect(test.calls.filter(call => Buffer.isBuffer(call.input))).toHaveLength(1);
+  });
+  it("refuses text until setup rather than using input text for Unicode", async () => {
+    const test = fixture({ installed: false });
+    await expect(test.backend.act({ type: "text", text: "中文" }, display, context)).rejects.toMatchObject({ code: "android_setup_required" });
+    expect(test.calls.filter(call => String(call.input).includes("ime enable"))).toHaveLength(0);
+  });
+  it("sends Unicode and shell metacharacters only as base64 and restores the original IME", async () => {
+    const test = fixture();
+    const text = "中文🙂\n'$(touch /tmp/not-executed)%s";
+    const result = await test.backend.act({ type: "text", text }, display, context);
+    expect(result).toMatchObject({ applied: true, acknowledged: true, inputMethodRestored: true });
+    const script = String(test.calls.find(call => String(call.input).includes("ime enable"))?.input);
+    expect(script).toContain(Buffer.from(text).toString("base64"));
+    expect(script).not.toContain("$(touch /tmp/not-executed)");
+    expect(script).toContain("trap relay_restore_input EXIT");
+    expect(script).toContain("'org.example.keyboard/.Ime'");
+    expect(script).toContain("'disable' '--user' '0' '" + ANDROID_INPUT_METHOD + "'");
+    expect(script).toContain("'expected_package' 'dev.cyjin.mcprelay.input'");
+  });
+  it("requires the exact request acknowledgement and never replays a failed text", async () => {
+    const test = fixture({ act: spec => {
+      const request = requestId(spec);
+      return ok('Broadcast completed: result=20, data="relay-input:' + request + ':no_input_connection"\n__RELAY_IME_RESTORED__' + request + ":1\n");
+    } });
+    await expect(test.backend.act({ type: "text", text: "一次" }, display, context)).rejects.toMatchObject({ code: "android_text_unconfirmed", details: { mayHaveApplied: true } });
+    expect(test.calls.filter(call => String(call.input).includes("'.COMMIT'"))).toHaveLength(0);
+    expect(test.calls.filter(call => String(call.input).includes("ime enable"))).toHaveLength(1);
+  });
+  it("keeps the lane until the root deadline and cleans up after client cancellation", async () => {
+    const test = fixture({ act: (spec, index) => {
+      if (index === 0) throw new ComputerError("cancelled", "cancelled", { mayHaveApplied: true });
+      const request = requestId(spec);
+      return ok("__RELAY_IME_RESTORED__" + request + ":1\n");
+    } });
+    await expect(test.backend.act({ type: "text", text: "不重试" }, display, context)).rejects.toMatchObject({ code: "cancelled", details: { mayHaveApplied: true } });
+    expect(test.waits.reduce((sum, value) => sum + value, 0)).toBeGreaterThanOrEqual(19000);
+    expect(test.calls.filter(call => String(call.input).includes("ime enable"))).toHaveLength(1);
+    expect(test.calls.filter(call => String(call.input).includes("relay_restore_input"))).toHaveLength(2);
+  });
+  it("does not type malformed UTF-16 or oversized text", async () => {
+    const test = fixture();
+    await expect(test.backend.act({ type: "text", text: "\ud800" }, display, context)).rejects.toMatchObject({ code: "invalid_text" });
+    await expect(test.backend.act({ type: "text", text: "中".repeat(22000) }, display, context)).rejects.toMatchObject({ code: "text_too_large" });
+    expect(test.calls.some(call => String(call.input).includes("ime enable"))).toBe(false);
+  });
+  it("rejects stale rotation before coordinates are injected", async () => {
+    const test = fixture({ real: "2000 x 1200", rotation: 1 });
+    await expect(test.backend.act({ type: "click", x: 20, y: 20 }, display, context)).rejects.toMatchObject({ code: "display_changed" });
+    expect(test.calls.some(call => String(call.input).includes("'tap'"))).toBe(false);
+  });
+  it("converts screenshot pixels to native input coordinates", async () => {
+    const test = fixture();
+    await test.backend.act({ type: "click", x: 300, y: 500 }, { ...display, width: 600, height: 1000, scaleX: 0.5, scaleY: 0.5 }, context);
+    expect(String(test.calls.at(-1)?.input)).toContain("'tap' '600' '1000'");
+  });
+  it("does not pretend separate keyevents are a key chord", async () => {
+    const test = fixture({ combo: false });
+    await expect(test.backend.act({ type: "key", keys: ["CTRL", "A"] }, display, context)).rejects.toMatchObject({ code: "unsupported_key_combination" });
+    expect(test.calls.some(call => String(call.input).includes("'keyevent'"))).toBe(false);
+  });
+  it("rejects hover, secondary clicks, and overlong gestures", async () => {
+    const test = fixture();
+    await expect(test.backend.act({ type: "move", x: 5, y: 5 }, display, context)).rejects.toMatchObject({ code: "unsupported_action" });
+    await expect(test.backend.act({ type: "click", button: "right", x: 5, y: 5 }, display, context)).rejects.toMatchObject({ code: "unsupported_button" });
+    await expect(test.backend.act({ type: "drag", fromX: 1, fromY: 1, toX: 2, toY: 2, durationMs: 6000 }, display, context)).rejects.toMatchObject({ code: "invalid_duration" });
+  });
+});

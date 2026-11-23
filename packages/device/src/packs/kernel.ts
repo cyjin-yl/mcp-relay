@@ -47,6 +47,7 @@ function format(value: unknown): string {
 
 export function createKernelPack(): ToolPack {
   let context: vm.Context;
+  let hasSessionState = false;
   const logs: string[] = [];
 
   function makeSandbox(root: string): Record<string, unknown> {
@@ -78,6 +79,7 @@ export function createKernelPack(): ToolPack {
   }
 
   function reset(root: string): void {
+    hasSessionState = false;
     logs.length = 0;
     context = vm.createContext(makeSandbox(root), { name: "mcp-relay-kernel" });
   }
@@ -85,6 +87,7 @@ export function createKernelPack(): ToolPack {
   return {
     id: "kernel",
     tools,
+    updateBlockedReason: () => hasSessionState ? "persistent kernel state is active; call kernel_reset when the session is finished" : undefined,
     async call(name: string, args: JsonObject, ctx: PackContext): Promise<CallToolResult> {
       if (!ctx.allowKernel) return textResult("kernel pack is disabled on this device; start with --allow-kernel", true);
       try {
@@ -98,6 +101,7 @@ export function createKernelPack(): ToolPack {
         if (Buffer.byteLength(input.code, "utf8") > MAX_CODE_BYTES) throw new Error("code is too large");
         if (!context) reset(ctx.root);
         logs.length = 0;
+        hasSessionState = true;
         const value = vm.runInContext(input.code, context, {
           timeout: input.timeout_ms ?? DEFAULT_TIMEOUT_MS,
           filename: "kernel.js",

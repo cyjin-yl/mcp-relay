@@ -20,8 +20,10 @@ export async function listFiles(
   root: string,
   baseInput: string | undefined,
   pattern: string,
-  limit: number
+  limit: number,
+  signal?: AbortSignal
 ): Promise<string[]> {
+  signal?.throwIfAborted();
   const base = baseInput ? resolveInsideRoot(root, baseInput) : root;
   const stat = statSync(base);
   if (stat.isFile()) return [base];
@@ -37,6 +39,7 @@ export async function listFiles(
     absolute: false
   });
   const files: string[] = [];
+  signal?.throwIfAborted();
   for (const rel of entries.slice(0, Math.min(limit, MAX_SCAN_FILES))) {
     try {
       files.push(resolveInsideRoot(root, resolve(base, rel)));
@@ -96,7 +99,8 @@ async function ripgrep(
   pattern: string,
   glob: string | undefined,
   ignoreCase: boolean,
-  maxResults: number
+  maxResults: number,
+  signal?: AbortSignal
 ): Promise<GrepHit[] | null> {
   const target = base ? relative(root, base) || "." : ".";
   const args = [
@@ -113,11 +117,13 @@ async function ripgrep(
   try {
     const { stdout } = await execFileAsync("rg", args, {
       cwd: root,
+      ...(signal ? { signal } : {}),
       timeout: 10000,
       maxBuffer: 8 * 1024 * 1024
     });
     return parseRgJson(stdout, root, maxResults);
   } catch (error) {
+    signal?.throwIfAborted();
     const failure = error as NodeJS.ErrnoException & { code?: number | string; stdout?: string };
     if (failure.code === "ENOENT") return null;
     if (typeof failure.stdout === "string") {
@@ -135,7 +141,9 @@ export async function grepFiles(options: {
   glob?: string;
   ignoreCase?: boolean;
   maxResults: number;
+  signal?: AbortSignal;
 }): Promise<GrepHit[]> {
+  options.signal?.throwIfAborted();
   const flags = options.ignoreCase ? "i" : "";
   try {
     new RegExp(options.pattern, flags);
@@ -152,7 +160,8 @@ export async function grepFiles(options: {
     options.pattern,
     options.glob,
     options.ignoreCase === true,
-    options.maxResults
+    options.maxResults,
+    options.signal
   );
   if (fromRg !== null) return fromRg;
 
@@ -160,11 +169,13 @@ export async function grepFiles(options: {
     options.root,
     options.base,
     options.glob && options.glob.trim() !== "" ? options.glob : "**/*",
-    MAX_SCAN_FILES
+    MAX_SCAN_FILES,
+    options.signal
   );
   const regex = new RegExp(options.pattern, flags);
   const hits: GrepHit[] = [];
   for (const file of files) {
+    options.signal?.throwIfAborted();
     if (hits.length >= options.maxResults) break;
     let info;
     try {
@@ -204,7 +215,9 @@ export async function astGrep(options: {
   pattern: string;
   lang?: string;
   maxResults: number;
+  signal?: AbortSignal;
 }): Promise<GrepHit[]> {
+  options.signal?.throwIfAborted();
   const base = options.base ? resolveInsideRoot(options.root, options.base) : options.root;
   const target = relative(options.root, base) || ".";
   const args = [
@@ -215,7 +228,7 @@ export async function astGrep(options: {
     "--",
     target
   ];
-  const stdout = await runAstGrep(args, options.root);
+  const stdout = await runAstGrep(args, options.root, options.signal);
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);
@@ -244,29 +257,33 @@ export async function astGrep(options: {
 
 type ExecFailure = NodeJS.ErrnoException & { code?: number | string; stdout?: string; stderr?: string };
 
-async function runAstGrep(args: string[], cwd: string): Promise<string> {
+async function runAstGrep(args: string[], cwd: string, signal?: AbortSignal): Promise<string> {
   const candidates: Array<{ bin: string; verify: boolean }> = [
     { bin: "ast-grep", verify: false },
     { bin: "sg", verify: true }
   ];
   let lastError: Error | null = null;
   for (const candidate of candidates) {
+    signal?.throwIfAborted();
     if (candidate.verify) {
       try {
-        const { stdout } = await execFileAsync(candidate.bin, ["--version"], { timeout: 5000 });
+        const { stdout } = await execFileAsync(candidate.bin, ["--version"], { timeout: 5000, ...(signal ? { signal } : {}) });
         if (!stdout.includes("ast-grep")) continue;
       } catch {
+        signal?.throwIfAborted();
         continue;
       }
     }
     try {
       const { stdout } = await execFileAsync(candidate.bin, args, {
         cwd,
+        ...(signal ? { signal } : {}),
         timeout: 15000,
         maxBuffer: 8 * 1024 * 1024
       });
       return stdout;
     } catch (error) {
+      signal?.throwIfAborted();
       const failure = error as ExecFailure;
       if (failure.code === "ENOENT") continue;
       if (Number(failure.code) === 1 && (!failure.stdout || failure.stdout.trim() === "")) return "[]";

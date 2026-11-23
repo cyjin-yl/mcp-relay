@@ -69,12 +69,18 @@ sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 sudo systemctl enable --now caddy
 ```
 
-升级时只替换二进制并重启：
+升级时先保留旧二进制，再替换并重启。服务端调用预算与设备执行器需要一起升级，
+具体预算、取消与限流规则见 [TRANSPORT.md](TRANSPORT.md)。
 
 ```bash
+sudo install -m 0755 /usr/local/bin/mcp-relay "/usr/local/bin/mcp-relay.before-$(date -u +%Y%m%dT%H%M%SZ)"
 sudo install -m 0755 /tmp/mcp-relay /usr/local/bin/mcp-relay
 sudo systemctl restart mcp-relay
 ```
+
+设备包先安装到独立版本目录并验证，再停止旧启动器和旧进程，确认退出后用原来的
+`--root`、`--config`、`--packs` 与 opt-in 参数启动新版。保留旧目录和启动脚本供回退。
+不要同时启动使用同一个设备 token 的两个版本：旧进程会自动重连，双方可能反复替换连接。
 
 设备 CLI 会自行重连（指数退避，上限 30 s），无需重新配对。
 首次用 GitHub 登录 `ADMIN_GITHUB_LOGIN` 指定的账号会自动激活；`INVITE_REQUIRED=true` 时其他账号需在
@@ -209,7 +215,8 @@ certbot 自带 timer 负责续期；deploy hook 负责“复制 + reload”。�
   - `/mcp`
   - `/device/ws`
 - 缓存：上述路径加 bypass 规则；服务端本身返回 `Cache-Control: no-store`，但不要让边缘缓存 `/mcp`
-- 边缘读超时（约 100 s）大于单次工具调用上限（服务端下发 20 s，设备 CLI 最多接受 25 s），无需调整
+- Cloudflare 默认 Proxy Read Timeout 为 125 s；0.1.4 的 shell 最大内部响应预算为 123 s。
+  部署时检查 Caddy transport 的读取限制，不能配置为早于该预算的值；普通工具仍为 20 s。
 
 ## 7. SQLite 备份与恢复
 
@@ -307,7 +314,7 @@ server {
         proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
-        proxy_read_timeout 60s;
+        proxy_read_timeout 130s;
     }
 }
 ```

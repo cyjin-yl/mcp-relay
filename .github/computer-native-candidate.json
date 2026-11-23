@@ -1,0 +1,6 @@
+{
+  "bundle_url": "https://relay.cyjin.dev/updates/device/candidates/cfc010a6ff2ecdd3cd3b4ff2b61bcd1e2842844b6e3ff7cfbcae4f3c964fc921/cli.cjs",
+  "bundle_sha256": "cfc010a6ff2ecdd3cd3b4ff2b61bcd1e2842844b6e3ff7cfbcae4f3c964fc921",
+  "harness_url": "https://relay.cyjin.dev/updates/device/candidates/cfc010a6ff2ecdd3cd3b4ff2b61bcd1e2842844b6e3ff7cfbcae4f3c964fc921/computer-native-smoke-21070649579ef4d16ac6ce3099f879e55e7c175b006926bd53ea7893df068a5b.cjs",
+  "harness_sha256": "21070649579ef4d16ac6ce3099f879e55e7c175b006926bd53ea7893df068a5b"
+}

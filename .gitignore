@@ -7,6 +7,9 @@ data/
 !.env.example
 .secrets/
 coverage/
+__pycache__/
 
 
 .tmp/
+
+/release/
