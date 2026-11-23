@@ -84,7 +84,13 @@ function filteredEnv(): NodeJS.ProcessEnv {
     "TMPDIR",
     "PREFIX",
     "ANDROID_ROOT",
-    "ANDROID_DATA"
+    "ANDROID_DATA",
+    "ANDROID_RUNTIME_ROOT",
+    "ANDROID_ART_ROOT",
+    "ANDROID_I18N_ROOT",
+    "ANDROID_TZDATA_ROOT",
+    "BOOTCLASSPATH",
+    "DEX2OATBOOTCLASSPATH"
   ]) {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
