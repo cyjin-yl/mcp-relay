@@ -91,16 +91,23 @@ $form.Add_Shown({
 try{[Windows.Forms.Application]::Run($form)}finally{$timer.Stop();$timer.Dispose();$form.Dispose()}
 `;
 
-const MACOS_FIXTURE = String.raw`ObjC.import('Cocoa');
+const MACOS_FIXTURE = String.raw`function stage(name,detail){console.log(JSON.stringify({fixtureStage:name,at:Date.now(),detail:detail||null}));}
+stage('script-start');
+ObjC.import('Cocoa');
 ObjC.import('CoreGraphics');
+stage('frameworks-ready');
 var data=$.NSData.alloc.initWithBase64EncodedStringOptions('__FIXTURE__',0);
 var config=JSON.parse(ObjC.unwrap($.NSString.alloc.initWithDataEncoding(data,$.NSUTF8StringEncoding)));
+stage('payload-ready');
 var clicks=0,drags=0,scrolls=0,moves=0,held=false,moved=false;
+stage('target-register');
 ObjC.registerSubclass({name:'RelaySmokeTarget',superclass:'NSObject',methods:{
  'clicked:':{types:['void',['id']],implementation:function(sender){clicks++;}}
 }});
+stage('target-ready');
 // Inherit the actual AppKit method encodings (BOOL differs by architecture).
 // JXA permits omitted types for overrides; custom selectors still declare them.
+stage('canvas-register');
 ObjC.registerSubclass({name:'RelaySmokeCanvas',superclass:'NSView',methods:{
  'acceptsFirstResponder':function(){return true;},
  'mouseDown:':function(event){held=true;moved=false;this.window.makeFirstResponder(this);},
@@ -109,13 +116,20 @@ ObjC.registerSubclass({name:'RelaySmokeCanvas',superclass:'NSView',methods:{
  'scrollWheel:':function(event){scrolls++;},
  'drawRect:':function(rect){$.NSColor.colorWithCalibratedRedGreenBlueAlpha(0.12,0.51,0.70,1).set;$.NSRectFill(rect);}
 }});
+stage('canvas-ready');
+stage('application-create');
 var app=$.NSApplication.sharedApplication;
+stage('application-ready');
 app.setActivationPolicy(0);
+stage('activation-policy-ready');
 var main=$.NSScreen.screens.objectAtIndex(0).frame;
+stage('window-create');
 var window=$.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer($.NSMakeRect(main.origin.x+80,main.origin.y+80,640,440),15,2,false);
+stage('window-ready');
 window.title=config.title;
 window.level=3;
 window.setReleasedWhenClosed(false);
+stage('controls-create');
 var text=$.NSTextView.alloc.initWithFrame($.NSMakeRect(20,300,600,100));
 text.font=$.NSFont.systemFontOfSize(18);
 text.richText=false;
@@ -126,24 +140,43 @@ var target=$.RelaySmokeTarget.alloc.init;
 button.target=target;button.action='clicked:';
 var canvas=$.RelaySmokeCanvas.alloc.initWithFrame($.NSMakeRect(20,20,600,190));
 window.contentView.addSubview(text);window.contentView.addSubview(button);window.contentView.addSubview(canvas);
+stage('controls-ready');
+stage('finish-launching');
 app.finishLaunching;
-window.makeKeyAndOrderFront(null);app.activateIgnoringOtherApps(true);window.makeFirstResponder(text);
+stage('finish-launching-ready');
+window.makeKeyAndOrderFront(null);
+stage('window-ordered',{visible:!!window.isVisible});
+app.activateIgnoringOtherApps(true);
+stage('application-activated',{active:!!app.isActive,visible:!!window.isVisible});
+window.makeFirstResponder(text);
+stage('responder-ready');
 function center(view,x,y){
  var inWindow=view.convertRectToView($.NSMakeRect(x,y,1,1),null);
  var onScreen=window.convertRectToScreen(inWindow);
  var height=$.CGDisplayBounds($.CGMainDisplayID()).size.height;
  return{x:onScreen.origin.x,y:height-onScreen.origin.y};
 }
-var deadline=Date.now()+240000;
-while(Date.now()<deadline&&!$.NSFileManager.defaultManager.fileExistsAtPath(config.stop)&&window.isVisible){
+var deadline=Date.now()+240000,startupDeadline=Date.now()+10000,firstEvent=true,firstState=true,seenVisible=false;
+stage('event-loop-enter',{visible:!!window.isVisible,active:!!app.isActive});
+// Ordering and activation can need an initial AppKit event turn. Always pump
+// during bounded startup; after a visible window closes, stop this own fixture.
+while(Date.now()<deadline&&!$.NSFileManager.defaultManager.fileExistsAtPath(config.stop)){
+ if(seenVisible&&!window.isVisible)break;
  var event=app.nextEventMatchingMaskUntilDateInModeDequeue(0xffffffff,$.NSDate.dateWithTimeIntervalSinceNow(0.06),$.NSDefaultRunLoopMode,true);
+ if(firstEvent){stage('first-event-returned',{isNil:event.isNil()});firstEvent=false;}
  if(!event.isNil())app.sendEvent(event);
  app.updateWindows;
+ var visible=!!window.isVisible,active=!!app.isActive,keyWindow=!!window.isKeyWindow;
+ if(visible)seenVisible=true;
  var cursor=$.NSEvent.mouseLocation;
- var record={title:config.title,foreground:!!app.isActive,pointer:{x:cursor.x,y:$.CGDisplayBounds($.CGMainDisplayID()).size.height-cursor.y},text:ObjC.unwrap(text.string),clickCount:clicks,dragCount:drags,scrollCount:scrolls,moveCount:moves,dragging:held,
+ var record={title:config.title,foreground:active&&visible&&keyWindow,applicationActive:active,visible:visible,keyWindow:keyWindow,pointer:{x:cursor.x,y:$.CGDisplayBounds($.CGMainDisplayID()).size.height-cursor.y},text:ObjC.unwrap(text.string),clickCount:clicks,dragCount:drags,scrollCount:scrolls,moveCount:moves,dragging:held,
  regions:{text:center(text,100,50),click:center(button,100,22),dragStart:center(canvas,80,70),dragEnd:center(canvas,180,110),scroll:center(canvas,240,100)}};
- $(JSON.stringify(record)).writeToFileAtomicallyEncodingError(config.state,true,$.NSUTF8StringEncoding,null);
+ var wrote=$(JSON.stringify(record)).writeToFileAtomicallyEncodingError(config.state,true,$.NSUTF8StringEncoding,null);
+ if(firstState){stage('first-state-written',{wrote:!!wrote,foreground:record.foreground});firstState=false;}
+ if(!wrote)throw new Error('The owned fixture could not write its state file.');
+ if(!seenVisible&&Date.now()>=startupDeadline)throw new Error('The owned window did not become visible within the startup deadline.');
 }
+stage('event-loop-exit',{visible:!!window.isVisible,active:!!app.isActive});
 window.close;
 `;
 

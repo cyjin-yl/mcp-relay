@@ -140,7 +140,12 @@ async function main(): Promise<void> {
     try { return JSON.parse(readFileSync(fixture.statePath, "utf8")) as FixtureState; } catch { return undefined; }
   }
   async function focused(): Promise<FixtureState> {
-    await until(() => fixtureState()?.foreground === true, 10000, "owned fixture focus");
+    await until(() => {
+      const child = fixture?.child;
+      if (child && (child.exitCode !== null || child.signalCode !== null))
+        throw new Error("Owned fixture exited before focus: " + JSON.stringify({ exitCode: child.exitCode, signalCode: child.signalCode }));
+      return fixtureState()?.foreground === true;
+    }, 10000, "owned fixture focus");
     const state = fixtureState()!; assert.equal(state.title, fixture!.title); return state;
   }
   let frameNumber = 0;
@@ -324,7 +329,9 @@ async function main(): Promise<void> {
       try { await until(() => worker!.exitCode !== null || worker!.signalCode !== null, 25000, "owned worker cleanup"); }
       catch { report.workerCleanupPending = true; worker.kill("SIGTERM"); }
     }
+    if (fixture) report.fixtureProcessBeforeStop = { pid: fixture.child.pid, exitCode: fixture.child.exitCode, signalCode: fixture.child.signalCode };
     await fixture?.stop();
+    if (fixture) report.fixtureProcessAfterStop = { pid: fixture.child.pid, exitCode: fixture.child.exitCode, signalCode: fixture.child.signalCode };
     if (observer) {
       if (observer.child.exitCode === null && observer.child.signalCode === null) observer.child.kill("SIGTERM");
       report.runtimeObserverLog = observer.log();

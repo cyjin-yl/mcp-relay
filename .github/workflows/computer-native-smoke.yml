@@ -136,7 +136,7 @@ jobs:
           NODE
       - name: Diagnose system PowerShell startup with a frozen read-only probe
         if: matrix.runtime == 'powershell51'
-        timeout-minutes: 3
+        timeout-minutes: 5
         continue-on-error: true
         shell: bash
         run: |
@@ -147,8 +147,8 @@ jobs:
           import { spawnSync } from 'node:child_process';
           const root = join(process.env.RUNNER_TEMP, 'relay-computer-native');
           const evidence = join(root, 'startup-diagnostic'); mkdirSync(evidence, { recursive: true });
-          const url = 'https://relay.cyjin.dev/updates/device/candidates/a4b45084441464109eca15f1ca41394944b5cae9dcd57def2a2e4a5d6551123c/windows-native-startup-diagnostic-81d7f3c209edafbd5ed7ac05acfbb8dcf19b59bdaf8dc7a59c189e076e2fd941.cjs';
-          const sha = '81d7f3c209edafbd5ed7ac05acfbb8dcf19b59bdaf8dc7a59c189e076e2fd941';
+          const url = 'https://relay.cyjin.dev/updates/device/candidates/9ed362e43466f4d9626e7c5be325aff5ba63713360241c76d584a2ff9a78a495/windows-native-startup-diagnostic-56414cc90a7114540285bd566edc26539812b66a9fa15216e40606940c974f93.cjs';
+          const sha = '56414cc90a7114540285bd566edc26539812b66a9fa15216e40606940c974f93';
           async function downloadArtifact(url, limit, timeoutMs) {
             const networkCodes = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE',
               'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
