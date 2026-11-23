@@ -1,0 +1,141 @@
+name: Native computer capability (prebuilt)
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_url:
+        description: Immutable standalone candidate URL
+        required: true
+        type: string
+      bundle_sha256:
+        description: Expected standalone candidate SHA256
+        required: true
+        type: string
+      harness_url:
+        description: Immutable prebuilt native harness URL
+        required: true
+        type: string
+      harness_sha256:
+        description: Expected native harness SHA256
+        required: true
+        type: string
+  push:
+    branches: [feat/computer-use-20261123]
+    paths:
+      - .github/workflows/computer-native-smoke.yml
+      - .github/computer-native-candidate.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-computer-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    name: Native UI / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Download frozen prebuilt artifacts and check SHA256
+        shell: bash
+        env:
+          INPUT_BUNDLE_URL: ${{ inputs.bundle_url }}
+          INPUT_BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+          INPUT_HARNESS_URL: ${{ inputs.harness_url }}
+          INPUT_HARNESS_SHA256: ${{ inputs.harness_sha256 }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { spawnSync } from 'node:child_process';
+          const root = join(process.env.RUNNER_TEMP, 'relay-computer-native');
+          mkdirSync(root, { recursive: true });
+          const manual = Boolean(process.env.INPUT_BUNDLE_URL);
+          const config = manual ? {
+            bundle_url: process.env.INPUT_BUNDLE_URL,
+            bundle_sha256: process.env.INPUT_BUNDLE_SHA256,
+            harness_url: process.env.INPUT_HARNESS_URL,
+            harness_sha256: process.env.INPUT_HARNESS_SHA256,
+          } : JSON.parse(readFileSync('.github/computer-native-candidate.json', 'utf8'));
+          const verified = {};
+          for (const [kind, filename] of [['bundle', 'cli.cjs'], ['harness', 'computer-native-smoke.cjs']]) {
+            const sha = String(config[kind + '_sha256'] ?? '').toLowerCase();
+            if (!/^[a-f0-9]{64}$/.test(sha)) throw new Error('Invalid SHA256: ' + kind);
+            const url = new URL(config[kind + '_url']);
+            if (url.origin !== 'https://relay.cyjin.dev' || !url.pathname.startsWith('/updates/device/') || url.username || url.password || url.search || url.hash)
+              throw new Error('Candidate URL must be an immutable relay.cyjin.dev update artifact');
+            const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(60000) });
+            if (!response.ok) throw new Error('Artifact fetch failed: ' + response.status);
+            const reader = response.body.getReader(), parts = []; let bytes = 0;
+            for (;;) { const chunk = await reader.read(); if (chunk.done) break;
+              bytes += chunk.value.length;
+              if (bytes > 16 * 1024 * 1024) { await reader.cancel(); throw new Error('Artifact exceeds size limit'); }
+              parts.push(chunk.value);
+            }
+            const body = Buffer.concat(parts);
+            if (createHash('sha256').update(body).digest('hex') !== sha) throw new Error('Artifact SHA256 mismatch: ' + kind);
+            const destination = join(root, filename); writeFileSync(destination, body);
+            const syntax = spawnSync(process.execPath, ['--check', destination], { encoding: 'utf8' });
+            if (syntax.status !== 0) throw new Error('Prebuilt JavaScript syntax failed: ' + kind + '\n' + syntax.stderr);
+            verified[kind] = { url: url.toString(), sha256: sha, bytes: body.length };
+          }
+          writeFileSync(join(root, 'artifact-provenance.json'), JSON.stringify(verified, null, 2) + '\n');
+          NODE
+      - name: Run actual CLI against owned native test window
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { spawnSync } from 'node:child_process';
+          const root = join(process.env.RUNNER_TEMP, 'relay-computer-native');
+          const evidence = join(root, 'evidence'); mkdirSync(evidence, { recursive: true });
+          const result = spawnSync(process.execPath, [join(root, 'computer-native-smoke.cjs'), join(root, 'cli.cjs'), evidence], {
+            timeout: 420000, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, env: process.env,
+          });
+          writeFileSync(join(root, 'harness.stdout.log'), result.stdout ?? '');
+          writeFileSync(join(root, 'harness.stderr.log'), result.stderr ?? '');
+          if (result.error) throw result.error;
+          const receipt = JSON.parse(readFileSync(join(evidence, 'acceptance.json'), 'utf8'));
+          const provenance = JSON.parse(readFileSync(join(root, 'artifact-provenance.json'), 'utf8'));
+          assert.equal(receipt.bundleSha256, provenance.bundle.sha256);
+          assert.equal(receipt.platform, process.platform);
+          const title = process.platform === 'win32' ? 'Windows' : 'macOS';
+          if (result.status === 77 && receipt.status === 'blocked') {
+            assert.equal(receipt.passed, false); assert.equal(receipt.uiVerified, false);
+            assert(receipt.cases.some(item => item.passed && item.name.includes('permission blocker')));
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+              '## ' + title + ': capability unavailable\n\nThe native OS/session or permission boundary refused capture/input. No full desktop UI pass is claimed. See acceptance.json for exact permissions and the refused operation.\n');
+            console.log(JSON.stringify({ status: 'capability-unavailable', permissions: receipt.capabilities?.permissions, reason: receipt.capabilities?.reason }));
+            if (process.platform === 'win32') throw new Error('Windows native desktop acceptance requires an interactive UI pass; the runner reported blocked.');
+          } else {
+            assert.equal(result.status, 0, result.stdout + '\n' + result.stderr);
+            assert.equal(receipt.status, 'passed'); assert.equal(receipt.passed, true); assert.equal(receipt.uiVerified, true);
+            assert(receipt.cases.every(item => item.passed));
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+              '## ' + title + ': native UI verified\n\n' + receipt.cases.map(item => '- ' + item.name).join('\n') + '\n');
+            console.log(JSON.stringify({ status: 'native-ui-passed', cases: receipt.cases.length, backend: receipt.capabilities?.backend }));
+          }
+          NODE
+      - name: Upload native receipts and evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-computer-${{ matrix.os }}
+          path: ${{ runner.temp }}/relay-computer-native/
+          if-no-files-found: error
+          retention-days: 14
