@@ -41,7 +41,7 @@ Search uses `rg` when installed and falls back to a bounded JS scanner.
 
 **kernel** (opt-in, `--packs kernel --allow-kernel`): `kernel_eval`, `kernel_reset` with a persistent JS context and root-confined `relay.readFile/writeFile/list` helpers.
 
-**computer** (opt-in): `computer_info`, `computer_screenshot`, `computer_action`, `computer_handoff`, `computer_setup`. Native PNG images, fresh-frame coordinates, bounded input, request deduplication, and persistent pause. Supports Windows, macOS, Linux X11, and Android with existing su; see [computer use](../../docs/computer-use.md) for requirements and activation.
+**computer** (opt-in): `computer_info`, `computer_screenshot`, `computer_action`, `computer_handoff`, `computer_setup`. Native PNG images, fresh-frame coordinates, bounded input, request deduplication, and persistent pause. Supports Windows, macOS, Linux X11, Proxmox host access to local VM consoles, and Android with existing su; see [computer use](../../docs/computer-use.md) for requirements, target selection, and activation.
 
 **omp**: `omp_read` (`:50-80` selectors), `omp_hash`, `omp_apply_patch`
 (`*** Begin Patch`; `expected_hashes` is required for updates/deletes), `omp_glob`, `omp_grep`,
@@ -53,7 +53,7 @@ On the relay these appear as `d_<device-slug>__<tool>`, for example
 
 ## Safety
 
-- File-tool paths are resolved and confined to `--root`; symlink escapes are rejected. Computer tools operate on the explicitly enabled OS desktop.
+- File-tool paths are resolved and confined to `--root`; symlink escapes are rejected. Computer tools operate on the explicitly enabled OS desktop or PVE virtual console.
 - Shell tools run with a filtered environment, a root-confined working directory and a 120 s maximum timeout. On POSIX, Bash discovery checks `MCP_RELAY_BASH`, `$PREFIX/bin/bash`, Termux's absolute bash, `/bin/bash`, `bash` on `PATH`, then `sh`. Windows uses explicit native PowerShell or Git Bash, preserves UTF-8 output and cancels the process tree on timeout.
 - `write`/`edit` require the file to have been read in this device process and refuse to apply if it changed since that read.
 - `omp_apply_patch` requires `expected_hashes` for every update/delete; call `omp_hash` first.
@@ -76,7 +76,7 @@ node cli.cjs update-check --config <device-config>
 
 `update-status` reports the running worker/supervisor versions and update state without credentials. `update-check` requests an immediate check. Use `--no-auto-update` to opt out, or `--update-interval <seconds>` to change the interval.
 
-The npm package and the standalone HTTPS artifacts are separate publication channels. Publishing `/updates/device/0.1.7/cli.cjs` does not publish that version to npm or change the version returned by `npx`. An existing npm client older than 0.1.7 cannot acquire this supervisor from code already loaded in its process: it needs a one-time migration to a verified standalone launcher, or to an appropriate newer npm release once that package is published. Subsequent online releases use the configured HTTPS manifest.
+The npm package and the standalone HTTPS artifacts are separate publication channels. Publishing `/updates/device/0.1.9/cli.cjs` does not publish that version to npm or change the version returned by `npx`. An existing npm client older than 0.1.7 cannot acquire this supervisor from code already loaded in its process: it needs a one-time migration to a verified standalone launcher, or to an appropriate newer npm release once that package is published. Subsequent online releases use the configured HTTPS manifest.
 
 Keep the saved device config and identity during migration, and use a stable Node executable in the OS startup entry. See [Windows and online updates](../../docs/WINDOWS_AND_UPDATES.md) for the update lifecycle, kernel deferral, release integrity and recovery details.
 

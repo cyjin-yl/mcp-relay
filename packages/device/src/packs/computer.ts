@@ -6,7 +6,7 @@ import { MAX_NATIVE_IMAGE_BYTES, type CallToolResult, type JsonObject, type Tool
 import { jsonResult, type PackContext, type ToolPack } from "../pack.js";
 import { acquireUpdateLock } from "../updater.js";
 import { createAndroidBackend } from "../computer/android.js";
-import { createLinuxBackend } from "../computer/linux.js";
+import { createLinuxHostBackend } from "../computer/linux-host.js";
 import { createMacosBackend } from "../computer/macos.js";
 import { createWindowsBackend } from "../computer/windows.js";
 import { pngDimensions } from "../computer/native.js";
@@ -28,6 +28,7 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text"), text: z.string().max(16384) }).strict()
 ]);
 const infoSchema = z.object({ timeout_ms: timeout }).strict();
+const inspectSchema = z.object({ display_id: z.string().min(1).max(200).optional(), timeout_ms: timeout }).strict();
 const screenshotSchema = z.object({ display_id: z.string().min(1).max(200).optional(), timeout_ms: timeout }).strict();
 const inputSchema = z.object({
   request_id: z.string().regex(/^[a-zA-Z0-9._:-]{1,128}$/),
@@ -42,8 +43,8 @@ function descriptor(name: string, description: string, schema: z.ZodType, readOn
   return { name, description, inputSchema, annotations: { readOnlyHint: readOnly } };
 }
 const tools: ToolDescriptor[] = [
-  descriptor("computer_info", "Inspect desktop availability, screens, native input capabilities, permissions, and pause state. Does not grant permissions or install software.", infoSchema, true),
-  descriptor("computer_screenshot", "Observe the screen as a native PNG image. Returns frame_id and dimensions; all action coordinates are pixels of this exact image. Capture a fresh frame after changes.", screenshotSchema, true),
+  descriptor("computer_info", "Inspect desktop and local PVE VM console availability, input capabilities, permissions, and pause state. On a PVE host, choose display_id pve:<VMID> to inspect that VM's actual console; omit it to discover targets. Does not start VMs, grant permissions, or install software.", inspectSchema, true),
+  descriptor("computer_screenshot", "Observe the host screen or a selected PVE VM console as a native PNG image. Use display_id from computer_info (pve:<VMID> for a VM). Returns frame_id and dimensions; all action coordinates are pixels of this exact image. Capture a fresh frame after changes.", screenshotSchema, true),
   descriptor("computer_action", "Perform one bounded mouse/touch/keyboard/text action on a fresh frame. Requires write scope. Use a unique request_id; retrying the same ID never replays input in this worker. Unknown outcomes require a new screenshot before continuing. Text inserts text without pressing Enter.", inputSchema, false),
   descriptor("computer_handoff", "Pause or resume this device's computer control. Pause persists across updates; screenshots remain available. Resume requires fresh screenshots.", handoffSchema, false),
   descriptor("computer_setup", "Explicitly set up the platform input bridge, when available. Android installs the bundled signed Unicode IME; OS permission or su prompts require the user's local approval. Never bypasses lock screens or permission dialogs.", infoSchema, false)
@@ -66,13 +67,13 @@ export function selectComputerBackend(platform: NodeJS.Platform = process.platfo
     case "win32": return createWindowsBackend();
     case "darwin": return createMacosBackend();
     case "android": return createAndroidBackend();
-    case "linux": return createLinuxBackend();
+    case "linux": return createLinuxHostBackend();
     default: throw new ComputerError("unsupported_platform", "Computer control is unsupported on " + platform + ".");
   }
 }
 
 function geometry(display: ComputerDisplay): string {
-  return JSON.stringify([display.id, display.x, display.y, display.width, display.height,
+  return JSON.stringify([display.id, display.instanceId, display.x, display.y, display.width, display.height,
     display.scaleX ?? 1, display.scaleY ?? 1, display.rotation ?? 0]);
 }
 function checkPoint(display: ComputerDisplay, x: number, y: number): void {
@@ -172,7 +173,8 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
         const parsed = name === "computer_action" ? inputSchema.parse(args)
           : name === "computer_screenshot" ? screenshotSchema.parse(args)
           : name === "computer_handoff" ? handoffSchema.parse(args)
-          : ["computer_info", "computer_setup"].includes(name) ? infoSchema.parse(args)
+          : name === "computer_info" ? inspectSchema.parse(args)
+          : name === "computer_setup" ? infoSchema.parse(args)
           : undefined;
         if (!parsed) throw new ComputerError("unknown_tool", "Unknown computer tool.");
         const timeoutMs = parsed.timeout_ms ?? 30000;
@@ -227,7 +229,7 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
           } catch { controller.abort(new ComputerError("computer_disabled", "Computer settings could not be read.")); }
         }, 100);
         if (name === "computer_info") {
-          return jsonResult({ ...await backend.inspect(context()), enabled: true, paused: settings().paused,
+          return jsonResult({ ...await backend.inspect(context(), inspectSchema.parse(parsed).display_id), enabled: true, paused: settings().paused,
             generation, frame_ttl_ms: 120000, limits: { screenshot_bytes: MAX_NATIVE_IMAGE_BYTES, text_utf8_bytes: 65536 } });
         }
         if (name === "computer_screenshot") return await capture(screenshotSchema.parse(parsed).display_id, context());
@@ -244,7 +246,7 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
           throw new ComputerError("stale_frame", "Unknown or expired frame. Capture a fresh screenshot before acting.");
         }
         checkAction(input.action, frame.display);
-        const state = await backend.inspect(context());
+        const state = await backend.inspect(context(), frame.display.id);
         if (!state.available) throw new ComputerError("desktop_unavailable", state.reason ?? "Desktop is unavailable.");
         if (!state.actions.includes(input.action.type)) {
           throw new ComputerError("unsupported_action", "This device does not support action " + input.action.type + ".");

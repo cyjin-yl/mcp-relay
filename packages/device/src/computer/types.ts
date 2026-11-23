@@ -10,6 +10,8 @@ export type ComputerActionType = ComputerAction["type"];
 
 export interface ComputerDisplay {
   id: string;
+  /** Identity of the source process/console, when a stable display ID can be reused. */
+  instanceId?: string;
   /** Origin in native input coordinates. */
   x: number;
   y: number;
@@ -61,7 +63,7 @@ export interface ComputerBackend {
   readonly id: string;
   /** Explicit setup only; inspecting capabilities must never install or grant permissions. */
   setup?(context: NativeContext): Promise<Record<string, unknown>>;
-  inspect(context: NativeContext): Promise<ComputerState>;
+  inspect(context: NativeContext, displayId?: string): Promise<ComputerState>;
   screenshot(displayId: string | undefined, context: NativeContext): Promise<CapturedScreen>;
   /** All action coordinates are local pixels of the supplied screenshot/display. */
   act(action: ComputerAction, display: ComputerDisplay, context: NativeContext): Promise<Record<string, unknown>>;

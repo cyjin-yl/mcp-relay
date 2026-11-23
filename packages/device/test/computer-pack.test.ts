@@ -36,6 +36,33 @@ function data(result: { structuredContent?: unknown }): Record<string, unknown> 
 }
 
 describe("computer pack observation and action contract", () => {
+  it("inspects and acts only on the VM selected by the captured frame", async () => {
+    const f = fixture();
+    f.display.id = "pve:101";
+    f.display.instanceId = "pve:101:1000:2000:boot-a";
+    await f.pack.call("computer_info", { display_id: "pve:101" }, ctx);
+    expect(f.inspect).toHaveBeenLastCalledWith(expect.any(Object), "pve:101");
+    const frame_id = await f.frame();
+    const result = await f.pack.call("computer_action", {
+      frame_id, request_id: "vm-bound", action: { type: "click", x: 0, y: 0 }
+    }, ctx);
+    expect(result.isError).not.toBe(true);
+    expect(f.inspect).toHaveBeenLastCalledWith(expect.any(Object), "pve:101");
+    expect(f.act).toHaveBeenCalledWith(expect.any(Object),
+      expect.objectContaining({ id: "pve:101", instanceId: "pve:101:1000:2000:boot-a" }), expect.any(Object));
+  });
+  it("rejects a reused VM ID after its process identity changes", async () => {
+    const f = fixture();
+    f.display.id = "pve:101";
+    f.display.instanceId = "pve:101:1000:2000:boot-a";
+    const frame_id = await f.frame();
+    f.display.instanceId = "pve:101:1001:3000:boot-a";
+    const result = await f.pack.call("computer_action", {
+      frame_id, request_id: "old-vm-instance", action: { type: "key", keys: ["Enter"] }
+    }, ctx);
+    expect(data(result).code).toBe("display_changed");
+    expect(f.act).not.toHaveBeenCalled();
+  });
   it("returns one native image without duplicating its base64 in metadata", async () => {
     const f = fixture();
     const result = await f.pack.call("computer_screenshot", {}, ctx);

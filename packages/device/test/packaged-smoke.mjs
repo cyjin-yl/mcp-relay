@@ -3,13 +3,15 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { WebSocketServer } from "ws";
 
 const cli = resolve(process.argv[2] ?? "packages/device/dist/cli.cjs");
+const expectedVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+assert.equal(typeof expectedVersion, "string", "The package must declare the expected artifact version");
 const root = mkdtempSync(join(tmpdir(), "relay-package-smoke-"));
 const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
 await once(server, "listening");
@@ -60,7 +62,7 @@ async function waitFile(path) {
 }
 try {
   const announced = await Promise.race([hello.promise, exit.then(() => { throw new Error(`client exited before hello: ${logs}`); })]);
-  assert.equal(announced.device.version, "0.1.7");
+  assert.equal(announced.device.version, expectedVersion);
   for (const name of ["read", "bash", "bash_confirm", "kernel_eval", "kernel_reset"]) {
     assert.ok(announced.tools.some((tool) => tool.name === name), `missing tool ${name}`);
   }
