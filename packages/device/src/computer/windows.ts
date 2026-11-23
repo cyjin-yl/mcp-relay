@@ -243,10 +243,10 @@ switch($request.op) {
  'click' {[RelayWinDesktop]::Click([int]$request.x,[int]$request.y,[string]$request.button,[int]$request.clicks);$result=@{performed='click'}}
  'drag' {[RelayWinDesktop]::Drag([int]$request.x,[int]$request.y,[int]$request.toX,[int]$request.toY,[int]$request.durationMs);$result=@{performed='drag'}}
  'scroll' {[RelayWinDesktop]::Scroll([string]$request.direction,[int]$request.amount,[bool]$request.point,[int]$request.x,[int]$request.y);$result=@{performed='scroll'}}
- 'key' {[RelayWinDesktop]::Keys([ushort[]]$request.keys);$result=@{performed='key'}}
+ 'key' {[RelayWinDesktop]::Keys([System.UInt16[]]$request.keys);$result=@{performed='key'}}
  'text' {[RelayWinDesktop]::Text([string]$request.text);$result=@{performed='text'}}
  'releaseText' {[RelayWinDesktop]::ReleaseText([string]$request.text);$result=@{performed='release'}}
- 'release' {[RelayWinDesktop]::Release([string]$request.button,[ushort[]]$request.keys);$result=@{performed='release'}}
+ 'release' {[RelayWinDesktop]::Release([string]$request.button,[System.UInt16[]]$request.keys);$result=@{performed='release'}}
  default {throw 'Unknown computer operation'}
 }
 @{ok=$true;result=$result}|ConvertTo-Json -Compress -Depth 12

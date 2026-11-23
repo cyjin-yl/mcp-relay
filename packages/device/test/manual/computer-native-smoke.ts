@@ -6,8 +6,8 @@
 import assert from "node:assert/strict";
 import { fork, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -43,6 +43,34 @@ function isCaptureDenied(info: ComputerState): boolean {
       "An unknown macOS capture permission is a native helper failure, not an OS permission blocker.");
   }
   return info.permissions.screenCapture === "denied";
+}
+async function ownedFixtureCrash(pid: number, startedAt: number): Promise<Record<string, unknown>> {
+  const directory = join(homedir(), "Library", "Logs", "DiagnosticReports"), deadline = Date.now() + 4000;
+  do {
+    try {
+      const names = readdirSync(directory).filter(name => name.startsWith("osascript") && name.endsWith(".ips")).sort().reverse().slice(0, 10);
+      for (const name of names) {
+        const file = join(directory, name), stat = statSync(file);
+        if (stat.mtimeMs < startedAt - 2000 || stat.size > 8 * 1024 * 1024) continue;
+        const raw = readFileSync(file, "utf8");
+        // Modern .ips contains a one-line metadata object followed by the report.
+        let parsed: { pid?: number; procName?: string; faultingThread?: number; exception?: { type?: string; signal?: string };
+          threads?: Array<{ triggered?: boolean; frames?: Array<{ imageIndex?: number; symbol?: string; symbolLocation?: number }> }>;
+          usedImages?: Array<{ name?: string }> };
+        try { parsed = JSON.parse(raw); } catch { parsed = JSON.parse(raw.slice(raw.indexOf("\n") + 1)); }
+        if (parsed.pid !== pid || parsed.procName !== "osascript") continue;
+        const threads = parsed.threads ?? [], fault = typeof parsed.faultingThread === "number" ? threads[parsed.faultingThread] : threads.find(thread => thread.triggered);
+        // Never copy the full report, environment, user metadata or unrelated PIDs.
+        return { matchedOwnedProcess: true, pid, exceptionType: parsed.exception?.type, signal: parsed.exception?.signal,
+          frames: (fault?.frames ?? []).slice(0, 24).map(frame => ({
+            image: typeof frame.imageIndex === "number" ? parsed.usedImages?.[frame.imageIndex]?.name : undefined,
+            symbol: frame.symbol, symbolLocation: frame.symbolLocation,
+          })) };
+      }
+    } catch { /* a report may still be being written; no unrelated contents are emitted */ }
+    await delay(200);
+  } while (Date.now() < deadline);
+  return { matchedOwnedProcess: false, pid, reason: "No matching own-process crash report was ready within four seconds." };
 }
 type NativeRuntimeObserver = { child: ChildProcess; readyPath: string; proofPath: string; log(): string };
 function observeWorkerPowerShell(workerPid: number, evidence: string): NativeRuntimeObserver {
@@ -369,6 +397,10 @@ async function main(): Promise<void> {
     if (fixture) report.fixtureProcessBeforeStop = { pid: fixture.child.pid, exitCode: fixture.child.exitCode, signalCode: fixture.child.signalCode };
     await fixture?.stop();
     if (fixture) report.fixtureProcessAfterStop = { pid: fixture.child.pid, exitCode: fixture.child.exitCode, signalCode: fixture.child.signalCode };
+    if (fixture?.child.pid && process.platform === "darwin" && ["SIGSEGV", "SIGBUS", "SIGABRT"].includes(fixture.child.signalCode ?? "")) {
+      report.fixtureCrash = await ownedFixtureCrash(fixture.child.pid, Date.parse(String(report.startedAt)));
+      writeFileSync(join(evidence, "fixture-crash-summary.json"), JSON.stringify(report.fixtureCrash, null, 2) + "\n");
+    }
     if (observer) {
       if (observer.child.exitCode === null && observer.child.signalCode === null) observer.child.kill("SIGTERM");
       report.runtimeObserverLog = observer.log();

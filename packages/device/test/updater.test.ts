@@ -32,7 +32,7 @@ function workerSource(version: string, behavior: Behavior = {}): string {
     "const version = " + JSON.stringify(version) + ";",
     "const behavior = " + JSON.stringify(behavior) + ";",
     'if (process.argv.includes("--version")) { process.stdout.write(version + "\\n"); process.exit(0); }',
-    'const record = (event) => fs.appendFileSync(process.argv[2], JSON.stringify({version,event,pid:process.pid,paused:process.env.MCP_RELAY_START_DRAINED === "1"}) + "\\n");',
+    'const record = (event) => fs.appendFileSync(process.argv[2], JSON.stringify({version,event,pid:process.pid,at:Date.now(),paused:process.env.MCP_RELAY_START_DRAINED === "1"}) + "\\n");',
     'record("start");',
     'if (behavior.ready !== false) setTimeout(() => process.send({type:"relay:ready",version}), 20);',
     'if (behavior.crashMs) setTimeout(() => process.exit(42), behavior.crashMs);',
@@ -47,7 +47,7 @@ function workerSource(version: string, behavior: Behavior = {}): string {
     'process.on("disconnect", () => process.exit(0));'
   ].join("\n");
 }
-interface Event { version: string; event: string; pid: number; paused: boolean }
+interface Event { version: string; event: string; pid: number; paused: boolean; at?: number }
 interface HarnessOptions {
   current?: Behavior;
   candidate?: Behavior;
@@ -242,9 +242,28 @@ it("immediately honors a persistent-kernel deferral and records its actionable r
   const h = harness({ current: { deferReason: reason }, supervisor: { drainTimeoutMs: 15_000 } });
   h.start();
   try {
-    await h.wait(() => (h.status().lastResult as { status?: string })?.status === "deferred", 5_000);
-    expect(h.status()).toMatchObject({ version: "1.0.0", lastResult: { status: "deferred", reason } });
-    expect(h.events().some((event) => event.event === "shutdown")).toBe(false);
+    // Initial registration, artifact staging and both Node preflights precede drain.
+    // Measure deferral from the worker receiving drain, not from fixture startup.
+    let drainedWorker: Event | undefined;
+    await h.wait(() => {
+      drainedWorker = h.events().find((event) => event.version === "1.0.0" && event.event === "drain");
+      return Boolean(drainedWorker);
+    }, 12_000);
+    expect(drainedWorker?.at).toBeTypeOf("number");
+    let status: Record<string, unknown> = {};
+    await h.wait(() => {
+      status = h.status();
+      return (status.lastResult as { status?: string })?.status === "deferred";
+    }, 5_000);
+    const deferralMs = Number(status.updatedAt) - Number(drainedWorker?.at);
+    expect(deferralMs).toBeGreaterThanOrEqual(0);
+    expect(deferralMs).toBeLessThan(5_000);
+    expect(status).toMatchObject({ version: "1.0.0", phase: "running", lastResult: { status: "deferred", reason } });
+    const events = h.events();
+    expect(events.some((event) => event.event === "shutdown")).toBe(false);
+    const starts = events.filter((event) => event.event === "start");
+    expect(starts).toHaveLength(1);
+    expect(starts[0]?.pid).toBe(drainedWorker?.pid);
   } finally { await h.stop(); }
 });
 

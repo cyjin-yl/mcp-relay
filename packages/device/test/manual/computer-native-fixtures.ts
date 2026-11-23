@@ -150,10 +150,14 @@ app.activateIgnoringOtherApps(true);
 stage('application-activated',{active:!!app.isActive,visible:!!window.isVisible});
 window.makeFirstResponder(text);
 stage('responder-ready');
-function center(view,x,y){
+function center(view,x,y,label){
+ if(firstState)stage('region-'+label+'-view-convert-start');
  var inWindow=view.convertRectToView($.NSMakeRect(x,y,1,1),null);
+ if(firstState)stage('region-'+label+'-view-convert-ready');
  var onScreen=window.convertRectToScreen(inWindow);
+ if(firstState)stage('region-'+label+'-screen-convert-ready');
  var height=$.CGDisplayBounds($.CGMainDisplayID()).size.height;
+ if(firstState)stage('region-'+label+'-height-ready');
  return{x:onScreen.origin.x,y:height-onScreen.origin.y};
 }
 var deadline=Date.now()+240000,startupDeadline=Date.now()+10000,firstEvent=true,firstState=true,seenVisible=false;
@@ -168,11 +172,32 @@ while(Date.now()<deadline&&!$.NSFileManager.defaultManager.fileExistsAtPath(conf
  if(firstState)stage('first-dispatch-finished');
  app.updateWindows;
  if(firstState)stage('first-windows-updated');
- var visible=!!window.isVisible,active=!!app.isActive,keyWindow=!!window.isKeyWindow;
+ if(firstState)stage('visible-getter-start');
+ var visible=!!window.isVisible;
+ if(firstState)stage('active-getter-start',{visible:visible});
+ var active=!!app.isActive;
+ if(firstState)stage('key-window-getter-start',{active:active});
+ var keyWindow=!!window.isKeyWindow;
+ if(firstState)stage('window-flags-ready',{visible:visible,active:active,keyWindow:keyWindow});
  if(visible)seenVisible=true;
+ if(firstState)stage('mouse-location-start');
  var cursor=$.NSEvent.mouseLocation;
- var record={title:config.title,foreground:active&&visible&&keyWindow,applicationActive:active,visible:visible,keyWindow:keyWindow,pointer:{x:cursor.x,y:$.CGDisplayBounds($.CGMainDisplayID()).size.height-cursor.y},text:ObjC.unwrap(text.string),clickCount:clicks,dragCount:drags,scrollCount:scrolls,moveCount:moves,dragging:held,
- regions:{text:center(text,100,50),click:center(button,100,22),dragStart:center(canvas,80,70),dragEnd:center(canvas,180,110),scroll:center(canvas,240,100)}};
+ if(firstState)stage('mouse-location-ready',{x:cursor.x,y:cursor.y});
+ if(firstState)stage('main-display-id-start');
+ var displayId=$.CGMainDisplayID();
+ if(firstState)stage('display-bounds-start',{id:displayId});
+ var displayBounds=$.CGDisplayBounds(displayId);
+ if(firstState)stage('display-bounds-ready');
+ var pointer={x:cursor.x,y:displayBounds.size.height-cursor.y};
+ if(firstState)stage('text-string-start');
+ var nativeText=text.string;
+ if(firstState)stage('text-unwrap-start');
+ var contents=ObjC.unwrap(nativeText);
+ if(firstState)stage('text-ready',{length:contents.length});
+ var regions={text:center(text,100,50,'text'),click:center(button,100,22,'click'),dragStart:center(canvas,80,70,'drag-start'),dragEnd:center(canvas,180,110,'drag-end'),scroll:center(canvas,240,100,'scroll')};
+ if(firstState)stage('all-regions-ready');
+ var record={title:config.title,foreground:active&&visible&&keyWindow,applicationActive:active,visible:visible,keyWindow:keyWindow,pointer:pointer,text:contents,clickCount:clicks,dragCount:drags,scrollCount:scrolls,moveCount:moves,dragging:held,regions:regions};
+ if(firstState)stage('state-write-start');
  var wrote=$(JSON.stringify(record)).writeToFileAtomicallyEncodingError(config.state,true,$.NSUTF8StringEncoding,null);
  if(firstState){stage('first-state-written',{wrote:!!wrote,foreground:record.foreground});firstState=false;}
  if(!wrote)throw new Error('The owned fixture could not write its state file.');
