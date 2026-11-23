@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { accessSync, constants, existsSync, statSync } from "node:fs";
-import { basename, isAbsolute, join, win32 } from "node:path";
+import { basename, isAbsolute, join, resolve, win32 } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { resolveInsideRoot } from "./paths.js";
 
@@ -69,7 +69,9 @@ function resolvePosixShell(source: NodeJS.ProcessEnv): ResolvedShell {
   ];
   const executable = (name: string): string | undefined => {
     const paths = isAbsolute(name) || name.includes("/") ? [name] : dirs.map((dir) => join(dir, name));
-    return paths.find((path) => {
+    // Bind the candidate to the daemon cwd before spawn switches to the tool
+    // cwd. Validate and execute the same absolute path.
+    return paths.map((path) => resolve(path)).find((path) => {
       try { return statSync(path).isFile() && (accessSync(path, constants.X_OK), true); }
       catch { return false; }
     });
@@ -111,11 +113,12 @@ export function resolveShellProgram(
   const candidates: string[] = [];
   const override = value(kind === "bash" ? "MCP_RELAY_BASH" : "MCP_RELAY_POWERSHELL");
   if (override) {
-    if (!win32.isAbsolute(override) || !/\.exe$/i.test(override) || !fileExists(override)
-      || (kind === "bash" && isWslBash(override))) {
+    const path = win32.resolve(override);
+    if (!win32.isAbsolute(override) || !/\.exe$/i.test(path) || !fileExists(path)
+      || (kind === "bash" && isWslBash(path))) {
       throw new Error("the configured " + kind + " executable must be an existing absolute .exe path");
     }
-    return override;
+    return path;
   }
   const programDirs = [value("PROGRAMW6432"), value("PROGRAMFILES"), value("PROGRAMFILES(X86)")]
     .filter((dir): dir is string => Boolean(dir));
@@ -132,13 +135,12 @@ export function resolveShellProgram(
   }
   for (const dir of (value("PATH") ?? "").split(";").filter(Boolean)) {
     const path = win32.join(dir.replace(/^"|"$/g, ""), kind === "bash" ? "bash.exe" : "pwsh.exe");
-    // Windows' legacy WSL launcher is not a native Bash: its cwd/root and
-    // environment refer to a different filesystem.
-    if (kind !== "bash" || !isWslBash(path)) {
-      candidates.push(path);
-    }
+    candidates.push(path);
   }
-  const found = candidates.find(fileExists);
+  // Normalize before both validation and WSL exclusion. Relative PATH entries
+  // must not select a different executable after the tool changes cwd.
+  const found = candidates.map((path) => win32.resolve(path))
+    .find((path) => (kind !== "bash" || !isWslBash(path)) && fileExists(path));
   if (found) return found;
   throw new Error(kind === "bash"
     ? "native Bash was not found; use the powershell tool or install Git for Windows"

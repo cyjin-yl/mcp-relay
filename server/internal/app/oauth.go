@@ -686,6 +686,10 @@ func (a *App) verifyBearer(r *http.Request) (*VerifiedToken, bool) {
 		return nil, false
 	}
 	raw := strings.TrimSpace(header[7:])
+	if strings.HasPrefix(raw, "mrshare_") {
+		token, err := a.store.VerifyShareToken(hashToken(raw), a.cfg.Resource)
+		return token, err == nil && token != nil
+	}
 	var userID, clientID, scope, audience string
 	var expiresAt int64
 	var revokedAt sql.NullInt64
@@ -697,7 +701,7 @@ func (a *App) verifyBearer(r *http.Request) (*VerifiedToken, bool) {
 	if err != nil || revokedAt.Valid || expiresAt <= nowUnix() || status != "active" || audience != a.cfg.Resource {
 		return nil, false
 	}
-	return &VerifiedToken{UserID: userID, ClientID: clientID, Scopes: strings.Fields(scope), Audience: audience}, true
+	return &VerifiedToken{UserID: userID, ClientID: clientID, Scopes: strings.Fields(scope), Audience: audience, ExpiresAt: expiresAt}, true
 }
 
 func (a *App) sendUnauthorized(w http.ResponseWriter) {

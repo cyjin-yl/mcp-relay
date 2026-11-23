@@ -1,11 +1,12 @@
 # 设备调用、超时与限流
 
-本文对应服务端修复和设备包 `@cyjin/mcp-relay@0.1.4`。服务端与设备需要一起更新；
+本文描述当前设备源码中的 transport、Windows shell 与更新行为；发布渠道和实装版本见
+[Windows 与在线更新说明](WINDOWS_AND_UPDATES.md)。服务端与设备需要一起更新，
 仅更新工具列表不能改变旧设备进程的执行逻辑。
 
 ## 调用顺序
 
-每个设备保留一个写入队列：`bash`、`bash_confirm`、文件修改、patch 和持久 kernel
+每个设备保留一个写入队列：shell、对应的确认工具、文件修改、patch 和持久 kernel
 按接收顺序执行。同一个 kernel 与文件状态在重连后继续使用同一个写入队列。
 即使旧执行器没有立即响应取消，新连接的修改也必须等它真正结束。
 
@@ -20,13 +21,19 @@
 ## 超时与取消
 
 调用预算从设备收到请求时开始，包含排队时间。已经过期或取消的排队项不会再调用
-执行器。正在执行的 shell 收到取消时终止自己的进程组；只有执行器实际返回后才会
-释放写入位置。外部系统已经接受的工作，例如远程 SSH 服务或容器内独立任务，不能
-靠结束本地 shell 撤销。
+执行器。正在执行的 shell 收到取消时，POSIX 请求终止自己的进程组，Windows 使用
+`taskkill /T /F` 请求终止进程树；只有执行器实际返回后才会释放写入位置。
 
-`bash.timeout_ms` 保持 1–120 秒、默认 30 秒。服务端给 shell 预算增加 1 秒用于回收，
-再留 2 秒接收设备的结果；普通工具保持 20 秒执行预算。`bash_confirm` 使用设备保存
-的一次性确认记录中的原始命令、目录和超时，服务端为它保留最大 shell 预算。
+直接 shell 已退出后，执行器最多再等待 1 秒排空继承的输出管道。若后台子进程仍持有
+管道，执行器关闭自己的管道端、标记截断并返回后台进程可能仍在运行的警告，然后释放
+写入位置。这个宽限计时不会让仍存活的直接 shell 提前释放位置，也不保证清理主动脱离
+的后台进程。外部系统已经接受的工作，例如远程 SSH 服务或容器内独立任务，不能靠结束
+本地 shell 撤销。
+
+`bash.timeout_ms` 和 `powershell.timeout_ms` 保持 1–120 秒、默认 30 秒。服务端给 shell
+预算增加 1 秒用于回收，再留 2 秒接收设备的结果；普通工具保持 20 秒执行预算。
+对应的确认工具使用设备保存的一次性确认记录中的原始命令、目录和超时，服务端为其
+保留最大 shell 预算。
 服务端等待 WebSocket 发送锁的时间也扣除；不会在调用结束后再向设备发送迟到的命令。
 
 取消信号覆盖 HTTP 请求上下文结束、服务端超时、设备 `cancel` 消息和 WebSocket
@@ -57,16 +64,21 @@ HTTP 429 同时返回 `Retry-After` 秒数和 JSON 的 `retry_after`、`scope`�
 
 ## Shell 与 Android 的运行环境
 
-工具通过非登录的 `bash -c` 执行命令，保留明确传入的 `PATH`、`HOME` 等环境，
-不会隐式加载用户的登录 profile。需要特定初始化的命令应显式写出相应初始化步骤；
-登录启动脚本中的网络请求或其它副作用不再消耗每次工具调用的执行时间。
+POSIX 工具解析可执行的 Bash 或 sh：Bash 使用 `--noprofile --norc -c`，sh 使用 `-c`，
+并保留明确传入的 `PATH`、`HOME` 等环境。Windows 使用原生 PowerShell 或 Git Bash，
+不把 WSL 启动器当作本机 Bash。需要特定初始化的命令应显式写出相应初始化步骤。
+
+POSIX 解析支持 `MCP_RELAY_BASH`、`PREFIX`、`PATH` 和系统候选位置。相对候选先按
+设备进程的工作目录变成绝对路径，再对同一路径校验和执行，因此工具切换 `cwd` 不会
+选择另一个同名程序。Windows 的候选路径也在校验前绝对化，显式 override 仍必须是
+绝对 `.exe` 路径；WSL 排除在路径规范化后执行。
 
 Android 设备 shell 额外保留八项固定系统路径变量：`ANDROID_DATA`、`ANDROID_ROOT`、
 `ANDROID_RUNTIME_ROOT`、`ANDROID_ART_ROOT`、`ANDROID_I18N_ROOT`、`ANDROID_TZDATA_ROOT`、
 `BOOTCLASSPATH`、`DEX2OATBOOTCLASSPATH`。它们供 ART、`app_process` 与 Termux-X11 使用。
 其它环境变量仍按原有白名单过滤，凭据和 `LD_PRELOAD` 不因这个修复透传。
-Android 从明确继承的 `PATH` 解析 `bash`，支持 Termux 的私有安装前缀；不依赖 `/bin/bash`
-存在或父进程加载路径重写 hook。其它受支持的 Unix 平台继续使用 `/bin/bash`。
+Android 使用同一套 POSIX 查找规则，支持 Termux 的私有安装前缀，不依赖 `/bin/bash`
+存在或父进程加载路径重写 hook。
 
 ## 验证入口
 

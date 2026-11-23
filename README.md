@@ -4,6 +4,7 @@ ChatGPT and Claude MCP connector for devices you control.
 
 - Public endpoint: `https://relay.cyjin.dev/mcp` (Streamable HTTP, JSON responses)
 - Auth: self-hosted OAuth 2.1 AS (DCR with public/secret clients + PKCE S256 + resource audience binding)
+- Temporary access: one-time claim links for selected devices, expiring MCP tokens, owner revocation, and an LLM-ready connection file
 - Device agent: `npx -y @cyjin/mcp-relay connect --code ...` (outbound WSS, no inbound ports)
 - Server: Go + SQLite on OVH, Caddy for TLS/static, Cloudflare proxy
 - Tool packs: minimal file/shell tools, OMP hash-anchored patches/search, an optional persistent kernel, and opt-in native computer use (Windows, macOS, Linux X11, rooted Android)
@@ -43,3 +44,5 @@ See [docs/CONNECT.md](docs/CONNECT.md) for ChatGPT/Claude setup and
 [docs/RUNBOOK.md](docs/RUNBOOK.md) for operations.
 
 See [Native computer use](docs/computer-use.md) for screen/input capabilities, explicit enablement, platform requirements, handoff, and update behavior.
+
+See [Temporary device sharing](docs/TEMPORARY_SHARES.md) for handing selected devices to another agent, the claim API, expiry, revocation, and verification.

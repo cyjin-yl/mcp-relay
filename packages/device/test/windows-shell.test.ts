@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { win32 } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
@@ -11,9 +12,9 @@ vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
-    existsSync: (path: string) => /^[A-Z]:\\/i.test(String(path))
-      ? fixture.files.has(String(path)) : actual.existsSync(path),
-    statSync: (path: string) => /^[A-Z]:\\/i.test(String(path))
+    existsSync: (path: string) => fixture.files.has(String(path)) || (/^[A-Z]:\\/i.test(String(path))
+      ? false : actual.existsSync(path)),
+    statSync: (path: string) => fixture.files.has(String(path)) || /^[A-Z]:\\/i.test(String(path))
       ? { isFile: () => fixture.files.has(String(path)) } : actual.statSync(path)
   };
 });
@@ -79,6 +80,25 @@ it("resolves native PowerShell and Git Bash while excluding the WSL shim", () =>
   fixture.files.add(gitBash);
   expect(resolveShellProgram("bash", "win32", source)).toBe(gitBash);
   expect(() => resolveShellProgram("bash", "win32", { MCP_RELAY_BASH: "bash.exe" })).toThrow("absolute .exe path");
+});
+
+it("binds a relative Windows PATH candidate to the daemon cwd before spawn changes cwd", () => {
+  const cwd = vi.spyOn(process, "cwd").mockReturnValue("C:\\relay");
+  try {
+    const relative = "bin\\bash.exe";
+    const absolute = win32.resolve(relative);
+    fixture.files.add(relative);
+    fixture.files.add(absolute);
+    expect(resolveShellProgram("bash", "win32", { PATH: "bin" })).toBe(absolute);
+  } finally { cwd.mockRestore(); }
+});
+
+it("excludes an absolute WSL override after resolving dot segments", () => {
+  const override = "C:\\Windows\\System32\\..\\System32\\bash.exe";
+  fixture.files.add(override);
+  fixture.files.add(win32.resolve(override));
+  expect(() => resolveShellProgram("bash", "win32", { MCP_RELAY_BASH: override }))
+    .toThrow("absolute .exe path");
 });
 
 it("passes Unicode and quotes to PowerShell without cmd.exe and decodes split UTF-8 output", async () => {

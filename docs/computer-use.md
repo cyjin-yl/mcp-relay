@@ -1,4 +1,4 @@
-# Native computer use — device 0.1.8
+# Native computer use — device 0.1.9
 
 The optional computer pack adds computer_info, computer_screenshot, computer_action,
 computer_handoff, and computer_setup. Screenshots are native MCP PNG image blocks,
@@ -23,9 +23,9 @@ A new connection can opt in with:
 
     node /path/to/cli.cjs connect --packs minimal,omp,computer --allow-computer --root /your/project
 
-Computer control accesses the logged-in desktop and is not confined by the file
-tools' --root. It does not grant OS permissions, accept su prompts, unlock a desktop,
-or authorize unrelated account actions.
+Computer control accesses the selected OS desktop or PVE virtual console and is
+not confined by the file tools' --root. It does not grant OS permissions, accept su
+prompts, unlock a desktop, or authorize unrelated account actions.
 
 Local control changes take effect during an operation:
 
@@ -44,6 +44,7 @@ blocks screenshots. A fresh screenshot is required after handoff.
 | Windows | Win32 capture, physical display coordinates, SendInput and UTF-16 text | Interactive user session; PowerShell 7 or Windows PowerShell 5.1 |
 | macOS (primary screen) | Quartz/JXA input, screencapture, Retina coordinate conversion | Aqua desktop; locally granted Screen Recording and Accessibility permissions |
 | Linux X11 | ImageMagick capture; XTEST via xdotool | Intended DISPLAY/XAUTHORITY; ImageMagick and xdotool |
+| Proxmox local QEMU VMs | Host VM discovery and QEMU virtual-console capture/input | PVE host access to qm and the selected VM's monitor; a guest virtual display |
 | Android | su, screencap, input, rotation checks, signed Unicode IME | Existing authorized su; system toybox timeout; Android 6+ for the bridge |
 
 Windows Session 0, locked/secure desktops, headless systems, and missing permissions
@@ -60,6 +61,46 @@ Linux Unicode input uses paced XTEST key mapping. Native acceptance covers Chine
 ASCII, and supplementary Unicode in a real test widget. Target application input
 handling can still differ; an input submission receipt is not proof of the intended
 application result.
+
+## Proxmox VM consoles
+
+The PVE host backend exposes local QEMU VMs through the same computer tools. Use
+computer_info to inspect the VM inventory and current availability, then select a
+VM with `display_id: "pve:<VMID>"`. The selected ID is accepted by computer_info
+and computer_screenshot, for example:
+
+```json
+{"display_id":"pve:123"}
+```
+
+Retain the screenshot's frame_id and use the normal computer_action arguments:
+
+```json
+{
+  "request_id": "pve-123-click-1",
+  "frame_id": "<frame from pve:123>",
+  "action": { "type": "click", "x": 320, "y": 180 },
+  "screenshot_after": true
+}
+```
+
+computer_action has no separate display_id argument: the frame binds the action
+to its VM. A different target, changed display geometry, or a restarted VM instance
+requires a new screenshot; reusing the same VMID does not make an old frame valid.
+The usual pause, frame-expiry, request-deduplication, and uncertain-outcome rules
+apply. This interface does not expose an arbitrary qm command tool.
+
+Capture is the QEMU virtual display. A physical monitor driven only by a GPU passed
+through to the guest is not captured through that display. LXC containers are not
+QEMU virtual displays. Inspect each target's reported capabilities before input.
+PVE text input assumes a US keyboard layout and supports ASCII only;
+`unicodeText: false` accurately reports that limitation. Non-ASCII input must not
+be treated as successfully typed.
+
+The relay device is the PVE host, so a temporary share of that device can access
+its enabled computer tools across the host's VMs, including VMs added later. Share
+scope still limits read versus input, but there is no VM-subset restriction within
+a device share. Selecting one VM for an action does not narrow the share itself.
 
 ## Android Unicode bridge
 
