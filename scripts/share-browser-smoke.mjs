@@ -210,7 +210,7 @@ function observe(page, label) {
 }
 async function screenshot(page, name) {
   if (!artifactDir) return;
-  await page.screenshot({ path: path.join(artifactDir, name), fullPage: true, mask: [page.locator('.share-link'), page.locator('#share-document')] });
+  await page.screenshot({ path: path.join(artifactDir, name), fullPage: true, mask: [page.locator('.share-link:visible'), page.locator('#share-document:visible')] });
   report.screenshots.push(name);
 }
 async function sharesTab(page) {
@@ -353,13 +353,16 @@ async function main() {
   passed('Issued token performs real allowed WebSocket calls and blocks the excluded online device', { dispatchedCalls: deviceCalls.length });
 
   const refreshed = owner.waitForResponse(response => new URL(response.url()).pathname === '/api/shares' && response.request().method() === 'GET');
-  await owner.locator('proto-ui-shadcn-button[aria-label="刷新分享记录"]').click();
+  // Base Button names itself from content. Its a11y adapter intentionally
+  // removes raw aria-label attributes, so query the rendered accessible name
+  // within the relevant section/row instead of an overwritten authoring attr.
+  await owner.locator('.share-list-card').getByRole('button', { name: '刷新', exact: true }).click();
   await refreshed;
   await row.getByText('已领取', { exact: true }).waitFor();
   await screenshot(owner, 'owner-active-desktop.png');
-  await row.locator('proto-ui-shadcn-button[aria-label="撤销分享 Browser rescue acceptance"]').click();
+  await row.getByRole('button', { name: '撤销', exact: true }).click();
   const revokeResponse = owner.waitForResponse(response => new URL(response.url()).pathname === `/api/shares/${created.share.id}/revoke` && response.request().method() === 'POST');
-  await owner.locator('proto-ui-shadcn-button').filter({ hasText: '撤销此分享' }).click();
+  await owner.getByRole('button', { name: '撤销此分享', exact: true }).click();
   assert.equal((await revokeResponse).status(), 200);
   await row.getByText('已撤销', { exact: true }).waitFor();
   result = await mcp(claimed.accessToken, 'tools/call', { name: 'device_call', arguments: { device: 'dev_qa_alpha', tool: 'write', arguments: { path: 'fixture.txt', content: 'after revoke' } } });
