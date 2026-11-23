@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -55,6 +55,21 @@ it("executes without implicit login profiles while retaining the explicit PATH a
     const result = await runShell(root, "if shopt -q login_shell; then exit 19; fi; command -v bash >/dev/null; printf '%s|%s' \"$MCP_RELAY\" \"$PWD\"", undefined, 2000);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe(`1|${root}`);
+    expect(result.stderr).toBe("");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+it("finds Android bash in the Termux prefix without LD_PRELOAD path rewriting", async () => {
+  const root = mkdtempSync(join(tmpdir(), "relay-termux-shell-"));
+  const bin = join(root, "termux", "usr", "bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "bash"), "#!/bin/sh\nprintf 'termux-bash\\n'\nexec /bin/bash \"$@\"\n", { mode: 0o755 });
+  vi.stubEnv("PATH", bin);
+  vi.stubEnv("LD_PRELOAD", "/untrusted/exec-rewrite.so");
+  try {
+    const result = await runShell(root, "printf 'command-ok|%s' \"${LD_PRELOAD-unset}\"", undefined, 2000, undefined, "android");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("termux-bash\ncommand-ok|unset");
     expect(result.stderr).toBe("");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

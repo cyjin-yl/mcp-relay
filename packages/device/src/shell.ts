@@ -34,9 +34,10 @@ export function runShell(
   command: string,
   cwdInput: string | undefined,
   timeoutMs: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  platform: NodeJS.Platform = process.platform
 ): Promise<ShellResult> {
-  if (process.platform === "win32") {
+  if (platform === "win32") {
     return Promise.reject(new Error("bash tool is not available on Windows devices"));
   }
   signal?.throwIfAborted();
@@ -44,9 +45,13 @@ export function runShell(
   return new Promise((resolve, reject) => {
     // Commands inherit the explicit environment below. Login profiles can run
     // unrelated startup hooks and must not consume a tool's execution budget.
-    const child = spawn("/bin/bash", ["-c", command], {
+    // Termux installs bash under its private prefix, not /bin. Resolve it from
+    // the same explicit PATH passed to the child, without relying on Android's
+    // optional LD_PRELOAD exec-path rewriting hook in the parent Node process.
+    const shell = platform === "android" ? "bash" : "/bin/bash";
+    const child = spawn(shell, ["-c", command], {
       cwd,
-      env: shellEnvironment(),
+      env: shellEnvironment(platform),
       detached: true,
       stdio: ["ignore", "pipe", "pipe"]
     });

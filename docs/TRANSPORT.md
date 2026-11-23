@@ -65,6 +65,8 @@ Android 设备 shell 额外保留八项固定系统路径变量：`ANDROID_DATA`
 `ANDROID_RUNTIME_ROOT`、`ANDROID_ART_ROOT`、`ANDROID_I18N_ROOT`、`ANDROID_TZDATA_ROOT`、
 `BOOTCLASSPATH`、`DEX2OATBOOTCLASSPATH`。它们供 ART、`app_process` 与 Termux-X11 使用。
 其它环境变量仍按原有白名单过滤，凭据和 `LD_PRELOAD` 不因这个修复透传。
+Android 从明确继承的 `PATH` 解析 `bash`，支持 Termux 的私有安装前缀；不依赖 `/bin/bash`
+存在或父进程加载路径重写 hook。其它受支持的 Unix 平台继续使用 `/bin/bash`。
 
 ## 验证入口
 
