@@ -13,9 +13,16 @@ export type ShellResult = {
   timedOut: boolean;
 };
 
-function filteredEnv(): NodeJS.ProcessEnv {
+export function shellEnvironment(platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { MCP_RELAY: "1" };
-  for (const key of ["PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR"]) {
+  const keys = ["PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR"];
+  if (platform === "android") {
+    // Android's app_process/ART and Termux-X11 need these system paths even
+    // for --help. Keep the allowlist explicit; never copy the caller's env.
+    keys.push("ANDROID_DATA", "ANDROID_ROOT", "ANDROID_RUNTIME_ROOT", "ANDROID_ART_ROOT",
+      "ANDROID_I18N_ROOT", "ANDROID_TZDATA_ROOT", "BOOTCLASSPATH", "DEX2OATBOOTCLASSPATH");
+  }
+  for (const key of keys) {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
@@ -26,16 +33,20 @@ export function runShell(
   root: string,
   command: string,
   cwdInput: string | undefined,
-  timeoutMs: number
+  timeoutMs: number,
+  signal?: AbortSignal
 ): Promise<ShellResult> {
   if (process.platform === "win32") {
     return Promise.reject(new Error("bash tool is not available on Windows devices"));
   }
+  signal?.throwIfAborted();
   const cwd = cwdInput ? resolveInsideRoot(root, cwdInput) : root;
   return new Promise((resolve, reject) => {
-    const child = spawn("/bin/bash", ["-lc", command], {
+    // Commands inherit the explicit environment below. Login profiles can run
+    // unrelated startup hooks and must not consume a tool's execution budget.
+    const child = spawn("/bin/bash", ["-c", command], {
       cwd,
-      env: filteredEnv(),
+      env: shellEnvironment(),
       detached: true,
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -65,21 +76,30 @@ export function runShell(
       stderrTruncated ||= r.truncated;
     });
 
-    const timer = setTimeout(() => {
+    const stop = () => {
       timedOut = true;
       try {
         if (child.pid) process.kill(-child.pid, "SIGKILL");
       } catch {
         child.kill("SIGKILL");
       }
-    }, timeoutMs);
+    };
+    const timer = setTimeout(stop, timeoutMs);
+    signal?.addEventListener("abort", stop, { once: true });
+    // No await occurs between the initial check and listener registration.
+    // This check also covers a custom signal that was already aborted.
+    if (signal?.aborted) stop();
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", stop);
+    };
 
     child.on("error", (error) => {
-      clearTimeout(timer);
+      cleanup();
       reject(error);
     });
     child.on("close", (code, signal) => {
-      clearTimeout(timer);
+      cleanup();
       resolve({
         exitCode: code,
         signal,

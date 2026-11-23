@@ -299,10 +299,16 @@ WWW-Authenticate: Bearer error="insufficient_scope", scope="relay.write", resour
 - 配对接口按 IP 限流（10 次 / 10 分钟），超限返回 `429`
 - `cannot reach relay`：设备所在网络需能出站访问 `https://relay.cyjin.dev:443`
 
+### 调用超时与限流
+
+- 服务端与设备包都升级到 0.1.4 对应实现后，shell 的排队时间计入调用预算，过期排队任务不会稍后执行；读取工具有独立的并发队列。
+- HTTP 429 返回 `Retry-After` 和 `retry_after`、`scope`，按剩余窗口等待；设备执行、发现控制请求和账号总量各有额度。
+- `bash` 使用明确环境下的非登录 shell，不自动加载登录 profile。需要的命令初始化应写进命令本身。
+- 刷新工具列表不能替代重启设备进程。详见 [设备调用、超时与限流](TRANSPORT.md)。
+
 ## 8. 安全边界
 
 - relay 只做鉴权、设备列表和调用转发；文件和命令都在设备上、`--root` 内执行
 - 设备 token 只能用于 `/device/ws`，不能调用 MCP
 - 审计只记录工具名、状态、耗时和参数的 SHA-256，不记录文件内容或 token
 - `~/.mcp-relay/device.json` 与 `/etc/mcp-relay/env` 都是敏感文件，不要贴到聊天或提交到仓库
-

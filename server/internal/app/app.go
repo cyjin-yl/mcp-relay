@@ -21,14 +21,16 @@ import (
 var staticFS embed.FS
 
 type App struct {
-	cfg          Config
-	store        *Store
-	registry     *Registry
-	client       *http.Client
-	limiter      *limiter
-	oauthLimiter *limiter
-	mcpLimiter   *limiter
-	pairLimiter  *limiter
+	cfg                 Config
+	store               *Store
+	registry            *Registry
+	client              *http.Client
+	limiter             *limiter
+	oauthLimiter        *limiter
+	mcpLimiter          *limiter
+	mcpDeviceLimiter    *limiter
+	mcpAggregateLimiter *limiter
+	pairLimiter         *limiter
 }
 
 func New(cfg Config) (*App, error) {
@@ -37,14 +39,16 @@ func New(cfg Config) (*App, error) {
 		return nil, err
 	}
 	return &App{
-		cfg:          cfg,
-		store:        st,
-		registry:     NewRegistry(),
-		client:       &http.Client{Timeout: 10 * time.Second},
-		limiter:      newLimiter(20, time.Hour),
-		oauthLimiter: newLimiter(300, time.Minute),
-		mcpLimiter:   newLimiter(120, time.Minute),
-		pairLimiter:  newLimiter(10, time.Hour),
+		cfg:                 cfg,
+		store:               st,
+		registry:            NewRegistry(),
+		client:              &http.Client{Timeout: 10 * time.Second},
+		limiter:             newLimiter(20, time.Hour),
+		oauthLimiter:        newLimiter(300, time.Minute),
+		mcpLimiter:          newLimiter(120, time.Minute),
+		mcpDeviceLimiter:    newLimiter(120, time.Minute),
+		mcpAggregateLimiter: newLimiter(360, time.Minute),
+		pairLimiter:         newLimiter(10, time.Hour),
 	}, nil
 }
 
@@ -280,6 +284,11 @@ func newLimiter(max int, window time.Duration) *limiter {
 }
 
 func (l *limiter) Allow(key string) bool {
+	allowed, _ := l.AllowWithRetry(key)
+	return allowed
+}
+
+func (l *limiter) AllowWithRetry(key string) (bool, time.Duration) {
 	now := time.Now().UnixNano()
 	cutoff := now - int64(l.window)
 	l.mu.Lock()
@@ -293,7 +302,7 @@ func (l *limiter) Allow(key string) bool {
 	}
 	if len(kept) >= l.max {
 		l.hits[key] = kept
-		return false
+		return false, time.Duration(kept[0] + int64(l.window) - now)
 	}
 	if len(l.hits) > 10000 {
 		for candidate, timestamps := range l.hits {
@@ -303,7 +312,7 @@ func (l *limiter) Allow(key string) bool {
 		}
 	}
 	l.hits[key] = append(kept, now)
-	return true
+	return true, 0
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

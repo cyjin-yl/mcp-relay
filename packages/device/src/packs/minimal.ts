@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { z } from "zod";
 import type { CallToolResult, JsonObject, ToolDescriptor } from "@mcp-relay/shared";
-import { atomicWrite, fileMode, readTextLimited, sha256Buffer } from "../fsutil.js";
+import { atomicWrite, fileMode, readFileSnapshot, sha256Buffer } from "../fsutil.js";
 import { displayPath, resolveInsideRoot } from "../paths.js";
 import { grepFiles, listFiles } from "../search.js";
 import { runShell, type ShellResult } from "../shell.js";
@@ -145,12 +145,13 @@ export function createMinimalPack(): ToolPack {
     async call(name: string, args: JsonObject, ctx: PackContext): Promise<CallToolResult> {
       const hashes = ctx.fileState ?? localHashes;
       try {
+        ctx.signal?.throwIfAborted();
         switch (name) {
           case "read": {
             const input = readSchema.parse(args);
             const file = resolveInsideRoot(ctx.root, input.path);
-            const text = readTextLimited(file, MAX_READ_BYTES);
-            hashes.set(file, sha256Buffer(readFileSync(file)));
+            const { text, sha256 } = readFileSnapshot(file, MAX_READ_BYTES);
+            hashes.set(file, sha256);
             const rawLines = text.split("\n");
             const lines = text === "" ? [] : text.endsWith("\n") ? rawLines.slice(0, -1) : rawLines;
             const offset = input.offset ?? 1;
@@ -180,8 +181,7 @@ export function createMinimalPack(): ToolPack {
           case "edit": {
             const input = editSchema.parse(args);
             const file = resolveInsideRoot(ctx.root, input.path);
-            const text = readTextLimited(file, MAX_READ_BYTES);
-            const current = sha256Buffer(readFileSync(file));
+            const { text, sha256: current } = readFileSnapshot(file, MAX_READ_BYTES);
             const seen = hashes.get(file);
             if (!seen) throw new Error("read the file before editing it");
             if (seen !== current) throw new Error("file changed since it was read; read it again");
@@ -196,6 +196,12 @@ export function createMinimalPack(): ToolPack {
                 input.new_string +
                 text.slice(text.indexOf(input.old_string) + input.old_string.length);
             const nextBuffer = Buffer.from(next, "utf8");
+            // A shell may write concurrently with this synchronous handler.
+            // Recheck before replacing, without associating its newer hash
+            // with the older text used to construct this edit.
+            if (sha256Buffer(readFileSync(file)) !== current) {
+              throw new Error("file changed while preparing the edit; read it again");
+            }
             atomicWrite(file, nextBuffer, fileMode(file));
             hashes.set(file, sha256Buffer(nextBuffer));
             return textResult(`replaced ${input.replace_all ? count : 1} occurrence(s) in ${displayPath(ctx.root, file)}`);
@@ -215,7 +221,7 @@ export function createMinimalPack(): ToolPack {
               });
               return textResult(`Dangerous command requires a separate confirmation. Call bash_confirm with token ${token} and the exact same command. The user will be asked to confirm again.`, true);
             }
-            return formatShellResult(await runShell(ctx.root, input.command, input.cwd, input.timeout_ms ?? 30000));
+            return formatShellResult(await runShell(ctx.root, input.command, input.cwd, input.timeout_ms ?? 30000, ctx.signal));
           }
           case "bash_confirm": {
             if (!ctx.allowShell) throw new Error("shell tool is disabled on this device; start with --allow-shell");
@@ -227,12 +233,13 @@ export function createMinimalPack(): ToolPack {
             }
             if (pending.command !== input.command) throw new Error("command does not match the confirmation token");
             pendingBash.delete(input.token);
-            return formatShellResult(await runShell(ctx.root, pending.command, pending.cwd, pending.timeoutMs));
+            return formatShellResult(await runShell(ctx.root, pending.command, pending.cwd, pending.timeoutMs, ctx.signal));
           }
           case "grep": {
             const input = grepSchema.parse(args);
             const hits = await grepFiles({
               root: ctx.root,
+              ...(ctx.signal ? { signal: ctx.signal } : {}),
               ...(input.path !== undefined ? { base: input.path } : {}),
               pattern: input.pattern,
               ...(input.glob !== undefined ? { glob: input.glob } : {}),
@@ -244,7 +251,7 @@ export function createMinimalPack(): ToolPack {
           }
           case "find": {
             const input = findSchema.parse(args);
-            const files = await listFiles(ctx.root, input.path, input.pattern, input.max_results ?? 200);
+            const files = await listFiles(ctx.root, input.path, input.pattern, input.max_results ?? 200, ctx.signal);
             if (files.length === 0) return textResult("No files.");
             return textResult(files.map((file) => displayPath(ctx.root, file)).join("\n"));
           }

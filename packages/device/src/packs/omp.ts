@@ -1,7 +1,6 @@
-import { readFileSync } from "node:fs";
 import { z } from "zod";
 import type { CallToolResult, JsonObject, ToolDescriptor } from "@mcp-relay/shared";
-import { fileMode, readTextLimited, sha256Buffer } from "../fsutil.js";
+import { fileMode, readFileSnapshot } from "../fsutil.js";
 import { applyPatch, parsePatch } from "../patch.js";
 import { displayPath, resolveInsideRoot } from "../paths.js";
 import { astGrep, grepFiles, listFiles } from "../search.js";
@@ -92,12 +91,13 @@ export function createOmpPack(): ToolPack {
     tools,
     async call(name: string, args: JsonObject, ctx: PackContext): Promise<CallToolResult> {
       try {
+        ctx.signal?.throwIfAborted();
         switch (name) {
           case "omp_read": {
             const input = readSchema.parse(args);
             const file = resolveInsideRoot(ctx.root, input.path);
-            const text = readTextLimited(file, MAX_READ_BYTES);
-            ctx.fileState?.set(file, sha256Buffer(readFileSync(file)));
+            const { text, sha256 } = readFileSnapshot(file, MAX_READ_BYTES);
+            ctx.fileState?.set(file, sha256);
             const rawLines = text.split("\n");
             const lines = text === "" ? [] : text.endsWith("\n") ? rawLines.slice(0, -1) : rawLines;
             const range = parseSelector(input.selector);
@@ -112,12 +112,11 @@ export function createOmpPack(): ToolPack {
           case "omp_hash": {
             const input = hashSchema.parse(args);
             const file = resolveInsideRoot(ctx.root, input.path);
-            const text = readTextLimited(file, MAX_READ_BYTES);
-            const buffer = Buffer.from(text, "utf8");
-            ctx.fileState?.set(file, sha256Buffer(buffer));
+            const { buffer, sha256 } = readFileSnapshot(file, MAX_READ_BYTES);
+            ctx.fileState?.set(file, sha256);
             return jsonResult({
               path: displayPath(ctx.root, file),
-              sha256: sha256Buffer(buffer),
+              sha256,
               bytes: buffer.length,
               mode: fileMode(file).toString(8)
             });
@@ -138,7 +137,7 @@ export function createOmpPack(): ToolPack {
           }
           case "omp_glob": {
             const input = globSchema.parse(args);
-            const files = await listFiles(ctx.root, input.path, input.pattern, 1000);
+            const files = await listFiles(ctx.root, input.path, input.pattern, 1000, ctx.signal);
             if (files.length === 0) return textResult("No files.");
             return textResult(files.map((file) => displayPath(ctx.root, file)).join("\n"));
           }
@@ -146,6 +145,7 @@ export function createOmpPack(): ToolPack {
             const input = grepSchema.parse(args);
             const hits = await grepFiles({
               root: ctx.root,
+              ...(ctx.signal ? { signal: ctx.signal } : {}),
               ...(input.path !== undefined ? { base: input.path } : {}),
               pattern: input.pattern,
               ...(input.glob !== undefined ? { glob: input.glob } : {}),
@@ -159,6 +159,7 @@ export function createOmpPack(): ToolPack {
             const input = astSchema.parse(args);
             const hits = await astGrep({
               root: ctx.root,
+              ...(ctx.signal ? { signal: ctx.signal } : {}),
               ...(input.path !== undefined ? { base: input.path } : {}),
               pattern: input.pattern,
               ...(input.lang !== undefined ? { lang: input.lang } : {}),

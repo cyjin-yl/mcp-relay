@@ -4,6 +4,7 @@ import type { CallToolResult, JsonObject } from "@mcp-relay/shared";
 import { buildExecutor } from "./executor.js";
 import type { DeviceConfig } from "./config.js";
 import type { PackContext, ToolPack } from "./pack.js";
+import { CallScheduler } from "./scheduler.js";
 
 export type ConnectionOptions = {
   config: DeviceConfig;
@@ -19,6 +20,7 @@ export type ConnectionOptions = {
 type DeviceMessage =
   | { type: "hello_ack"; deviceId: string; slug: string; serverTime: number }
   | { type: "ping" }
+  | { type: "cancel"; id: string }
   | { type: "call"; id: string; tool: string; args?: JsonObject; timeoutMs?: number };
 
 function sleep(ms: number): Promise<void> {
@@ -43,14 +45,18 @@ export async function runConnection(options: ConnectionOptions): Promise<number>
   wsUrl.hash = "";
 
   let attempt = 0;
-  let current: WebSocket | null = null;
-  let queue: Promise<void> = Promise.resolve();
-
-  const enqueue = (task: () => Promise<void>): void => {
-    queue = queue.then(task, task);
-  };
+  const readOnlyTools = new Set(executor.tools
+    .filter((tool) => tool.annotations?.readOnlyHint === true).map((tool) => tool.name));
+  // The executor and kernel survive reconnects. Keep their writer lane too:
+  // an old non-cooperative operation must finish before new mutations run.
+  const scheduler = new CallScheduler<CallToolResult>();
 
   while (true) {
+    const callIds = new Set<string>();
+    const cancelSessionCalls = () => {
+      for (const id of callIds) scheduler.cancel(id);
+      callIds.clear();
+    };
     const { promise, resolve } = Promise.withResolvers<"retry" | "fatal">();
     let settled = false;
     const settle = (value: "retry" | "fatal"): void => {
@@ -65,7 +71,6 @@ export async function runConnection(options: ConnectionOptions): Promise<number>
       handshakeTimeout: 15000,
       maxPayload: 1024 * 1024
     });
-    current = ws;
 
     ws.on("open", () => {
       attempt = 0;
@@ -107,40 +112,43 @@ export async function runConnection(options: ConnectionOptions): Promise<number>
         options.log(`relay registered device ${message.slug}`);
         return;
       }
+      if (message.type === "cancel") {
+        if (callIds.has(message.id)) scheduler.cancel(message.id);
+        return;
+      }
       if (message.type !== "call") return;
-      enqueue(async () => {
-        const started = Date.now();
+      if (settled || ws.readyState !== WebSocket.OPEN || callIds.has(message.id)) return;
+      callIds.add(message.id);
+      const receivedAt = Date.now();
+      // This is the remaining transport budget, after the relay's send queue.
+      // It can be below the user-facing shell minimum; never enlarge it.
+      const requestedTimeout = message.timeoutMs ?? 20000;
+      const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
+        ? Math.min(requestedTimeout, 125000) : 0;
+      const args = message.args && typeof message.args === "object" ? message.args : {};
+      void scheduler.schedule(message.id, readOnlyTools.has(message.tool), timeoutMs,
+        (signal) => executor.call(message.tool, args, { ...context, signal }))
+      .then((result) => {
         const id = message.id;
-        try {
-          const args = message.args && typeof message.args === "object" ? message.args : {};
-          const timeoutMs = Math.min(Math.max(message.timeoutMs ?? 20000, 1000), 25000);
-          const { promise: timeout, reject } = Promise.withResolvers<never>();
-          const timer = setTimeout(() => reject(new Error(`tool timed out after ${timeoutMs}ms`)), timeoutMs);
-          let result: CallToolResult;
-          try {
-            result = await Promise.race([executor.call(message.tool, args, context), timeout]);
-          } finally {
-            clearTimeout(timer);
-          }
-          if (ws.readyState !== WebSocket.OPEN) return;
-          ws.send(JSON.stringify({ type: "result", id, ok: true, result }));
-          options.log(`${message.tool} ok ${Date.now() - started}ms`);
-        } catch (error) {
-          if (ws.readyState !== WebSocket.OPEN) return;
-          ws.send(
-            JSON.stringify({
-              type: "result",
-              id,
-              ok: false,
-              error: { code: "tool_error", message: (error as Error).message }
-            })
-          );
-          options.log(`${message.tool} error ${Date.now() - started}ms: ${(error as Error).message}`);
-        }
-      });
+        if (ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({ type: "result", id, ok: true, result }));
+        options.log(`${message.tool} ok ${Date.now() - receivedAt}ms`);
+      }).catch((error: Error & { code?: string }) => {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        ws.send(
+          JSON.stringify({
+            type: "result",
+            id: message.id,
+            ok: false,
+            error: { code: error.code ?? "tool_error", message: error.message }
+          })
+        );
+        options.log(`${message.tool} error ${Date.now() - receivedAt}ms: ${error.message}`);
+      }).finally(() => callIds.delete(message.id));
     });
 
     ws.on("close", (code, reason) => {
+      cancelSessionCalls();
       options.log(`disconnected code=${code}${reason.length > 0 ? ` reason=${reason.toString()}` : ""}`);
       settle(code === 4001 || code === 4003 || code === 1008 ? "fatal" : "retry");
     });
@@ -151,8 +159,11 @@ export async function runConnection(options: ConnectionOptions): Promise<number>
     });
 
     const outcome = await promise;
-    current = null;
-    if (outcome === "fatal") return 3;
+    cancelSessionCalls();
+    if (outcome === "fatal") {
+      scheduler.close();
+      return 3;
+    }
     attempt += 1;
     const delay = Math.min(30000, 1000 * 2 ** Math.min(attempt, 5)) + Math.floor(Math.random() * 500);
     options.log(`reconnecting in ${delay}ms`);

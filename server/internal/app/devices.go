@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -17,12 +18,13 @@ import (
 )
 
 const (
-	maxToolsPerDevice  = 100
-	maxInflightPerDev  = 8
-	deviceHeartbeat    = 25 * time.Second
-	deviceSilenceLimit = 60 * time.Second
-	deviceCallTimeout  = 20 * time.Second
-	maxToolSchemaBytes = 64 * 1024
+	maxToolsPerDevice   = 100
+	maxInflightPerDev   = 8
+	deviceHeartbeat     = 25 * time.Second
+	deviceSilenceLimit  = 60 * time.Second
+	deviceCallTimeout   = 20 * time.Second
+	deviceResponseGrace = 2 * time.Second
+	maxToolSchemaBytes  = 64 * 1024
 )
 
 var toolNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,39}$`)
@@ -138,7 +140,34 @@ func (d *LiveDevice) send(v any) error {
 	return d.conn.WriteJSON(v)
 }
 
-func (d *LiveDevice) call(tool string, args json.RawMessage, timeout time.Duration) (CallToolResult, error) {
+// Shell's advertised timeout is its execution budget. A small device-side
+// cleanup margin lets runShell reap its process group before the RPC expires.
+// Other tools retain the existing 20s budget.
+func toolExecutionTimeout(tool string, args json.RawMessage) time.Duration {
+	if tool == "bash_confirm" {
+		// The approved timeout is stored only on the device with its one-use token.
+		return 121 * time.Second
+	}
+	if tool != "bash" {
+		return deviceCallTimeout
+	}
+	budget := 30 * time.Second
+	var input struct {
+		TimeoutMS *int64 `json:"timeout_ms"`
+	}
+	if json.Unmarshal(args, &input) == nil && input.TimeoutMS != nil && *input.TimeoutMS >= 1000 && *input.TimeoutMS <= 120000 {
+		budget = time.Duration(*input.TimeoutMS) * time.Millisecond
+	}
+	return budget + time.Second
+}
+
+func (d *LiveDevice) call(ctx context.Context, tool string, args json.RawMessage, timeout time.Duration) (CallToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return CallToolResult{}, err
+	}
+	deadline := time.Now().Add(timeout)
+	callCtx, cancel := context.WithDeadline(ctx, deadline.Add(deviceResponseGrace))
+	defer cancel()
 	d.pendingMu.Lock()
 	if d.inflight >= maxInflightPerDev {
 		d.pendingMu.Unlock()
@@ -149,29 +178,66 @@ func (d *LiveDevice) call(tool string, args json.RawMessage, timeout time.Durati
 	d.pending[id] = ch
 	d.inflight++
 	d.pendingMu.Unlock()
-
-	if err := d.send(map[string]any{
-		"type":      "call",
-		"id":        id,
-		"tool":      tool,
-		"args":      args,
-		"timeoutMs": timeout.Milliseconds(),
-	}); err != nil {
-		d.finish(id)
-		return CallToolResult{}, fmt.Errorf("failed to send call to device: %w", err)
-	}
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+	defer d.finish(id)
+	// Waiting for the websocket writer is part of the budget too. A cancelled
+	// send must check its context after acquiring the lock, before sending a
+	// call that might have side effects. The buffered channel lets it retire
+	// after the HTTP handler has already returned.
+	sent := make(chan error, 1)
+	go func() { sent <- d.sendCall(callCtx, deadline, id, tool, args) }()
 	select {
-	case result := <-ch:
-		return result, nil
-	case <-timer.C:
-		d.finish(id)
+	case err := <-sent:
+		if err != nil {
+			return CallToolResult{}, fmt.Errorf("failed to send call to device: %w", err)
+		}
+	case <-callCtx.Done():
+		d.cancelCall(id)
+		if ctx.Err() != nil {
+			return CallToolResult{}, ctx.Err()
+		}
 		return CallToolResult{}, errors.New("device tool call timed out")
 	case <-d.closed:
 		return CallToolResult{}, errors.New("device disconnected")
 	}
+	select {
+	case result := <-ch:
+		return result, nil
+	case <-callCtx.Done():
+		d.cancelCall(id)
+		if ctx.Err() != nil {
+			return CallToolResult{}, ctx.Err()
+		}
+		return CallToolResult{}, errors.New("device tool call timed out")
+	case <-d.closed:
+		return CallToolResult{}, errors.New("device disconnected")
+	}
+}
+
+func (d *LiveDevice) sendCall(ctx context.Context, deadline time.Time, id, tool string, args json.RawMessage) error {
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	remaining := time.Until(deadline)
+	if remaining.Milliseconds() <= 0 {
+		return context.DeadlineExceeded
+	}
+	writeDeadline := time.Now().Add(10 * time.Second)
+	if deadline.Before(writeDeadline) {
+		writeDeadline = deadline
+	}
+	_ = d.conn.SetWriteDeadline(writeDeadline)
+	return d.conn.WriteJSON(map[string]any{
+		"type": "call", "id": id, "tool": tool, "args": args,
+		"timeoutMs": remaining.Milliseconds(),
+	})
+}
+
+func (d *LiveDevice) cancelCall(id string) {
+	// Do not add the websocket's write deadline (10s) to the HTTP response
+	// budget. The device also enforces its own queue-inclusive deadline.
+	go func() { _ = d.send(map[string]any{"type": "cancel", "id": id}) }()
 }
 
 func (d *LiveDevice) finish(id string) {

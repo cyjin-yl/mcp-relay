@@ -1,9 +1,11 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -35,7 +37,7 @@ func mcpCORS(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, MCP-Protocol-Version, Mcp-Session-Id")
-	w.Header().Set("Access-Control-Expose-Headers", "Mcp-Session-Id")
+	w.Header().Set("Access-Control-Expose-Headers", "Mcp-Session-Id, Retry-After")
 }
 
 func (a *App) mcpOptions(w http.ResponseWriter, _ *http.Request) {
@@ -61,27 +63,42 @@ func (a *App) mcpPost(w http.ResponseWriter, r *http.Request) {
 		a.sendUnauthorized(w)
 		return
 	}
-	if !a.mcpLimiter.Allow(token.UserID + "|" + token.ClientID) {
-		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too_many_requests"})
+	if allowed, retry := a.mcpAggregateLimiter.AllowWithRetry(token.UserID); !allowed {
+		writeMCPRateLimit(w, "account", retry)
 		return
 	}
 	if version := r.Header.Get("MCP-Protocol-Version"); version != "" && !protocolSupported(version) {
+		if !a.allowMCPBucket(w, token, nil) {
+			return
+		}
 		writeRPCError(w, json.RawMessage("null"), -32600, "unsupported MCP-Protocol-Version")
 		return
 	}
 	defer r.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1024*1024+1))
 	if err != nil || len(body) > 1024*1024 {
+		if !a.allowMCPBucket(w, token, nil) {
+			return
+		}
 		writeRPCError(w, json.RawMessage("null"), -32700, "request body too large or unreadable")
 		return
 	}
 	var req rpcRequest
 	if err := json.Unmarshal(body, &req); err != nil {
+		if !a.allowMCPBucket(w, token, nil) {
+			return
+		}
 		writeRPCError(w, json.RawMessage("null"), -32700, "parse error")
 		return
 	}
 	if req.JSONRPC != "2.0" || req.Method == "" {
+		if !a.allowMCPBucket(w, token, nil) {
+			return
+		}
 		writeRPCError(w, idOrNull(req.ID), -32600, "invalid request")
+		return
+	}
+	if !a.allowMCPBucket(w, token, &req) {
 		return
 	}
 	notification := len(req.ID) == 0 || string(req.ID) == "null"
@@ -133,13 +150,76 @@ func (a *App) mcpPost(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		a.mcpToolCall(w, req, token)
+		a.mcpToolCall(r.Context(), w, req, token)
 	default:
 		writeRPCError(w, req.ID, -32601, "method not found")
 	}
 }
 
-func (a *App) mcpToolCall(w http.ResponseWriter, req rpcRequest, token *VerifiedToken) {
+// Bucket only an authenticated user's existing device and exact tool. Invalid
+// device IDs remain in the control bucket and cannot allocate arbitrary keys.
+func (a *App) mcpExecutionDevice(userID string, req *rpcRequest) string {
+	if req == nil || req.Method != "tools/call" {
+		return ""
+	}
+	var params struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if json.Unmarshal(req.Params, &params) != nil {
+		return ""
+	}
+	if params.Name == "device_call" {
+		var args struct {
+			Device string `json:"device"`
+			Tool   string `json:"tool"`
+		}
+		if json.Unmarshal(params.Arguments, &args) != nil {
+			return ""
+		}
+		device, ok := a.registry.FindDevice(userID, args.Device)
+		if !ok {
+			return ""
+		}
+		for _, tool := range device.Tools {
+			if tool.Name == args.Tool {
+				return device.ID
+			}
+		}
+		return ""
+	}
+	if device, _, ok := a.registry.FindTool(userID, params.Name); ok {
+		return device.ID
+	}
+	return ""
+}
+
+func (a *App) allowMCPBucket(w http.ResponseWriter, token *VerifiedToken, req *rpcRequest) bool {
+	key := token.UserID + "|" + token.ClientID
+	bucket, scope := a.mcpLimiter, "control"
+	if deviceID := a.mcpExecutionDevice(token.UserID, req); deviceID != "" {
+		bucket, scope = a.mcpDeviceLimiter, "device"
+		key += "|" + deviceID
+	}
+	allowed, retry := bucket.AllowWithRetry(key)
+	if !allowed {
+		writeMCPRateLimit(w, scope, retry)
+	}
+	return allowed
+}
+
+func writeMCPRateLimit(w http.ResponseWriter, scope string, retry time.Duration) {
+	seconds := int64((retry + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	writeJSON(w, http.StatusTooManyRequests, map[string]any{
+		"error": "too_many_requests", "retry_after": seconds, "scope": scope,
+	})
+}
+
+func (a *App) mcpToolCall(ctx context.Context, w http.ResponseWriter, req rpcRequest, token *VerifiedToken) {
 	var params struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -162,7 +242,7 @@ func (a *App) mcpToolCall(w http.ResponseWriter, req rpcRequest, token *Verified
 		return
 	}
 	if params.Name == "device_call" {
-		a.mcpDeviceCall(w, req, token, args)
+		a.mcpDeviceCall(ctx, w, req, token, args)
 		return
 	}
 	if params.Name == "devices_list" {
@@ -190,7 +270,7 @@ func (a *App) mcpToolCall(w http.ResponseWriter, req rpcRequest, token *Verified
 		a.sendInsufficientScope(w, needed)
 		return
 	}
-	result, err := device.call(tool.Name, args, deviceCallTimeout)
+	result, err := device.call(ctx, tool.Name, args, toolExecutionTimeout(tool.Name, args))
 	status := "ok"
 	errCode := ""
 	if err != nil {
@@ -297,7 +377,7 @@ func (a *App) mcpDeviceToolsList(w http.ResponseWriter, req rpcRequest, token *V
 	}))
 }
 
-func (a *App) mcpDeviceCall(w http.ResponseWriter, req rpcRequest, token *VerifiedToken, args json.RawMessage) {
+func (a *App) mcpDeviceCall(ctx context.Context, w http.ResponseWriter, req rpcRequest, token *VerifiedToken, args json.RawMessage) {
 	var params struct {
 		Device    string          `json:"device"`
 		Tool      string          `json:"tool"`
@@ -347,7 +427,7 @@ func (a *App) mcpDeviceCall(w http.ResponseWriter, req rpcRequest, token *Verifi
 		return
 	}
 	start := time.Now()
-	result, err := device.call(target.Name, callArgs, deviceCallTimeout)
+	result, err := device.call(ctx, target.Name, callArgs, toolExecutionTimeout(target.Name, callArgs))
 	status := "ok"
 	errCode := ""
 	if err != nil {

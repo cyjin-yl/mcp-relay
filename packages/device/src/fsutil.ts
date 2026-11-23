@@ -6,7 +6,11 @@ export function sha256Buffer(data: Buffer | string): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
-export function readTextLimited(path: string, maxBytes: number): string {
+export function readFileSnapshot(path: string, maxBytes: number): {
+  buffer: Buffer;
+  text: string;
+  sha256: string;
+} {
   const info = lstatSync(path);
   if (!info.isFile()) {
     throw new Error(`not a regular file: ${path}`);
@@ -14,7 +18,17 @@ export function readTextLimited(path: string, maxBytes: number): string {
   if (info.size > maxBytes) {
     throw new Error(`file is too large (${info.size} bytes, limit ${maxBytes})`);
   }
-  return readFileSync(path, "utf8");
+  const buffer = readFileSync(path);
+  // Another process can grow or replace the file after lstat. Hash exactly
+  // the bytes returned to the reader, never a second read of the same path.
+  if (buffer.length > maxBytes) {
+    throw new Error(`file is too large (${buffer.length} bytes, limit ${maxBytes})`);
+  }
+  return { buffer, text: buffer.toString("utf8"), sha256: sha256Buffer(buffer) };
+}
+
+export function readTextLimited(path: string, maxBytes: number): string {
+  return readFileSnapshot(path, maxBytes).text;
 }
 
 export function fileMode(path: string): number {
