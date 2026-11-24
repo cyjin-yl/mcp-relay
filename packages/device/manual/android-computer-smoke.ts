@@ -138,7 +138,7 @@ async function actOwned(action: ComputerAction, display: ComputerDisplay) {
   enter("foreground-before-action");
   await assertOwnedForeground();
   enter("native-action");
-  const result = await backend.act(action, display, context);
+  const result = await backend.act(action, display, { ...context, expectedAppId: component });
   // Never continue after a focus switch, including when input may have applied.
   enter("foreground-after-action");
   await assertOwnedForeground();

@@ -101,6 +101,17 @@ describe("computer pack observation and action contract", () => {
     expect(data(stale).code).toBe("stale_frame");
     expect(f.act).not.toHaveBeenCalled();
   });
+  it("carries the captured application through inspection and action even when a later observation is unknown", async () => {
+    const f = fixture(), frame_id = await f.frame();
+    f.state.app = undefined;
+    const result = await f.pack.call("computer_action", {
+      frame_id, request_id: "bound-app", action: { type: "text", text: "once" }
+    }, ctx);
+    expect(result.isError).not.toBe(true);
+    expect(f.inspect).toHaveBeenCalledWith(expect.objectContaining({ expectedAppId: "test-app" }), f.display.id);
+    expect(f.act).toHaveBeenCalledWith({ type: "text", text: "once" }, f.display,
+      expect.objectContaining({ expectedAppId: "test-app" }));
+  });
   it("rejects display rotation/scaling and focus changes", async () => {
     const f = fixture(), frame_id = await f.frame();
     f.display.rotation = 90;

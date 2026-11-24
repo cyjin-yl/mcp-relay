@@ -246,7 +246,7 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
           throw new ComputerError("stale_frame", "Unknown or expired frame. Capture a fresh screenshot before acting.");
         }
         checkAction(input.action, frame.display);
-        const state = await backend.inspect(context(), frame.display.id);
+        const state = await backend.inspect({ ...context(), expectedAppId: frame.appId }, frame.display.id);
         if (!state.available) throw new ComputerError("desktop_unavailable", state.reason ?? "Desktop is unavailable.");
         if (!state.actions.includes(input.action.type)) {
           throw new ComputerError("unsupported_action", "This device does not support action " + input.action.type + ".");
@@ -264,7 +264,7 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
         if (settings().paused) throw new ComputerError("computer_paused", "Computer control is paused.");
         frames.clear(); // Consume all pre-action observations, including on unknown outcomes.
         attempted = true;
-        const outcome = await backend.act(input.action, current, context());
+        const outcome = await backend.act(input.action, current, { ...context(), expectedAppId: frame.appId });
         const receipt = { ok: true, request_id: requestId, action: actionType,
           completed_at: new Date(now()).toISOString(), elapsed_ms: now() - startedAt,
           ...outcome, requires_new_frame: true };

@@ -2,13 +2,14 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
-  ANDROID_INPUT_METHOD, createAndroidBackend, parseAndroidGeometry, parseAndroidApp, parseAndroidLock, androidKeyCode, parseAndroidInstallFailure
+  ANDROID_INPUT_METHOD, createAndroidBackend, parseAndroidGeometry, parseAndroidApp, parseAndroidLock, androidKeyCode, parseAndroidInstallFailure,
+  normalizeAndroidAppId, parseAndroidCommitAcknowledgement
 } from "../src/computer/android.js";
 import { ComputerError, type NativeCommand, type NativeContext, type NativeResult } from "../src/computer/types.js";
 
 const artifact = Buffer.alloc(1400, 90);
 const bridge = { version: "0.1.0", versionCode: 1, sha256: createHash("sha256").update(artifact).digest("hex"), base64: artifact.toString("base64") };
-const context: NativeContext = { timeoutMs: 30000 };
+const context: NativeContext = { timeoutMs: 30000, expectedAppId: "dev.cyjin.mcprelay.input/.ProbeActivity" };
 const display = { id: "0", x: 0, y: 0, width: 1200, height: 2000, scaleX: 1, scaleY: 1, rotation: 0 };
 const ok = (stdout = "", exitCode = 0): NativeResult => ({ stdout: Buffer.from(stdout), stderr: Buffer.alloc(0), exitCode });
 
@@ -50,8 +51,16 @@ function fixture(options: {
     run: async spec => {
       calls.push(spec);
       if (typeof spec.input === "string" && spec.input.includes("__RELAY_ANDROID_uid__")) {
-        if (options.probe) return options.probe(spec, probeIndex++);
-        return ok(probe(installed, options.combo, options.real, options.rotation, undefined, options.policy, options.power));
+        const result = options.probe ? await options.probe(spec, probeIndex++)
+          : ok(probe(installed, options.combo, options.real, options.rotation, undefined, options.policy, options.power));
+        const expected = /relay_focus_expected='([^']+)'/.exec(spec.input)?.[1];
+        if (!expected || result.exitCode !== 0) return result;
+        const observed = normalizeAndroidAppId(parseAndroidApp(result.stdout.toString("utf8"))?.id);
+        if (observed !== expected) {
+          const request = /__RELAY_ANDROID_FOCUS_BLOCKED__([a-f0-9]{32}):preflight/.exec(spec.input)![1];
+          return ok("__RELAY_ANDROID_FOCUS_BLOCKED__" + request + ":preflight:" + (observed ? "changed" : "unknown") + "\n", 73);
+        }
+        return ok(result.stdout.toString("utf8") + "\n__RELAY_ANDROID_bound_app__\n" + observed + "\n");
       }
       if (spec.args[1]?.includes("/system/bin/screencap -p")) return { stdout: png(), stderr: Buffer.alloc(0), exitCode: 0 };
       if (Buffer.isBuffer(spec.input)) {
@@ -249,14 +258,85 @@ describe("Android computer backend", () => {
     expect(script).toContain("'disable' '--user' '0' '" + ANDROID_INPUT_METHOD + "'");
     expect(script).toContain("'expected_package' 'dev.cyjin.mcprelay.input'");
   });
-  it("requires the exact request acknowledgement and never replays a failed text", async () => {
+  it.each([
+    [20, "no_input_connection"], [21, "focus_changed"], [22, "commit_rejected"], [23, "commit_exception"]
+  ])("reports only exact bridge refusal %i/%s and never replays text", async (resultCode, status) => {
     const test = fixture({ act: spec => {
       const request = requestId(spec);
-      return ok('Broadcast completed: result=20, data="relay-input:' + request + ':no_input_connection"\n__RELAY_IME_RESTORED__' + request + ":1\n");
+      return ok('Broadcast completed: result=' + resultCode + ', data="relay-input:' + request + ':' + status + '"\n__RELAY_IME_RESTORED__' + request + ":1\n");
     } });
-    await expect(test.backend.act({ type: "text", text: "一次" }, display, context)).rejects.toMatchObject({ code: "android_text_unconfirmed", details: { mayHaveApplied: true } });
-    expect(test.calls.filter(call => String(call.input).includes("'.COMMIT'"))).toHaveLength(0);
+    await expect(test.backend.act({ type: "text", text: "一次" }, display, context)).rejects.toMatchObject({
+      code: "android_text_unconfirmed", details: { mayHaveApplied: true, bridgeAcknowledgement: "matched",
+        bridgeResultCode: resultCode, bridgeStatus: status }
+    });
+    expect(test.calls.filter(call => String(call.input).includes("'dev.cyjin.mcprelay.input.COMMIT'"))).toHaveLength(1);
     expect(test.calls.filter(call => String(call.input).includes("ime enable"))).toHaveLength(1);
+  });
+  it.each(["other", "unknown"])("does not retarget a captured app after the next probe reports %s", async variant => {
+    const switched = variant === "other"
+      ? probe().replace("dev.cyjin.mcprelay.input/.ProbeActivity", "com.example.other/.OtherActivity")
+      : probe().replace("mCurrentFocus=Window{11 u0 dev.cyjin.mcprelay.input/.ProbeActivity}", "mCurrentFocus=null");
+    const test = fixture({ probe: (_spec, index) => ok(index === 0 ? probe() : switched) });
+    expect((await test.backend.inspect(context)).app?.id).toBe(context.expectedAppId);
+    await expect(test.backend.act({ type: "text", text: "private input" }, display, context)).rejects.toMatchObject({
+      code: variant === "other" ? "focus_changed" : "android_focus_unknown",
+      details: { phase: "preflight", mayHaveApplied: false }
+    });
+    expect(test.calls.some(call => String(call.input).includes("/system/bin/ime enable"))).toBe(false);
+    expect(test.calls.some(call => String(call.input).includes("'dev.cyjin.mcprelay.input.COMMIT'"))).toBe(false);
+  });
+  it("requires a screenshot target and accepts only its equivalent full component", async () => {
+    const test = fixture();
+    await expect(test.backend.act({ type: "text", text: "unbound" }, display, { timeoutMs: 30000 }))
+      .rejects.toMatchObject({ code: "android_focus_unknown", details: { mayHaveApplied: false } });
+    expect(test.calls).toHaveLength(0);
+    await test.backend.act({ type: "text", text: "bound" }, display, {
+      ...context, expectedAppId: "dev.cyjin.mcprelay.input/dev.cyjin.mcprelay.input.ProbeActivity"
+    });
+    const script = String(test.calls.find(call => String(call.input).includes("/system/bin/ime enable"))!.input);
+    expect(script).toContain("'expected_package' 'dev.cyjin.mcprelay.input'");
+    const firstGate = script.indexOf("if ! relay_focus_wait;");
+    const enable = script.indexOf("/system/bin/ime enable");
+    const set = script.indexOf("/system/bin/ime set");
+    const recheck = script.indexOf("if ! relay_focus_snapshot;");
+    const commit = script.indexOf("'/system/bin/am' 'broadcast'");
+    expect(firstGate).toBeGreaterThanOrEqual(0); expect(firstGate).toBeLessThan(enable);
+    expect(set).toBeLessThan(recheck); expect(recheck).toBeLessThan(commit);
+  });
+  it("does not mutate IME state during cleanup after a proven pre-input focus refusal", async () => {
+    const test = fixture({ act: spec => ok("__RELAY_ANDROID_FOCUS_BLOCKED__"
+      + requestId(spec) + ":preflight:changed\n", 73) });
+    await expect(test.backend.act({ type: "text", text: "once" }, display, context)).rejects.toMatchObject({
+      code: "focus_changed", details: { phase: "preflight", mayHaveApplied: false }
+    });
+    expect(test.calls.filter(call => String(call.input).includes("relay_restore_input"))).toHaveLength(1);
+    expect(test.waits).toHaveLength(0);
+  });
+  it("rejects another nonce without exposing its data or replaying the commit", async () => {
+    const test = fixture({ act: spec => {
+      const request = requestId(spec), other = request === "0".repeat(32) ? "1".repeat(32) : "0".repeat(32);
+      return ok('private native output\nBroadcast completed: result=-1, data="relay-input:' + other
+        + ':ok"\n__RELAY_IME_RESTORED__' + request + ":1\n");
+    } });
+    const error = await test.backend.act({ type: "text", text: "private payload" }, display, context).catch(e => e);
+    expect(error).toMatchObject({ code: "android_text_unconfirmed", details: {
+      mayHaveApplied: true, bridgeAcknowledgement: "missing_or_invalid"
+    } });
+    expect(error.details).not.toHaveProperty("bridgeResultCode");
+    expect(error.details).not.toHaveProperty("bridgeStatus");
+    expect(JSON.stringify(error)).not.toMatch(/private native output|private payload/);
+    expect(test.calls.filter(call => String(call.input).includes("'dev.cyjin.mcprelay.input.COMMIT'"))).toHaveLength(1);
+  });
+  it("rejects mismatched, duplicate, or unrecognized exact-nonce code/status pairs", () => {
+    const request = "a".repeat(32);
+    const line = (code: number, status: string) => 'Broadcast completed: result=' + code
+      + ', data="relay-input:' + request + ':' + status + '"\n';
+    for (const output of [line(21, "ok"), line(-1, "focus_changed"), line(999, "ok"),
+      line(21, "private_native_value"), line(-1, "ok") + line(21, "focus_changed")]) {
+      expect(parseAndroidCommitAcknowledgement(output, request)).toBeUndefined();
+    }
+    expect(parseAndroidCommitAcknowledgement("private native output\n" + line(21, "focus_changed"), request))
+      .toEqual({ resultCode: 21, status: "focus_changed" });
   });
   it("keeps the lane until the root deadline and cleans up after client cancellation", async () => {
     const test = fixture({ act: (spec, index) => {
