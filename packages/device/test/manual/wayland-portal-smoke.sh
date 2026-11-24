@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # This file must run under dbus-run-session in a disposable runner/container.
-# Xvfb is only the outer host of a real nested Mutter Wayland compositor. The
-# tested GTK application and helper have no DISPLAY and cannot use XWayland.
+# Mutter's native headless backend owns a real virtual monitor and Wayland
+# seat. No outer X11 server or XWayland input translation participates.
 : "${DBUS_SESSION_BUS_ADDRESS:?Run this harness with dbus-run-session}"
 : "${RELAY_NATIVE_EVIDENCE_DIR:?Choose an evidence directory outside the checkout}"
 case "$RELAY_NATIVE_EVIDENCE_DIR" in
@@ -28,16 +28,14 @@ export LIBGL_ALWAYS_SOFTWARE=1
 export GSK_RENDERER=cairo
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
-export RELAY_WAYLAND_NATIVE_TEST=nested-mutter-private-bus
-export MUTTER_DEBUG_NUM_DUMMY_MONITORS=1
-export MUTTER_DEBUG_DUMMY_MODE_SPECS=1600x1200
-export MUTTER_DEBUG_DUMMY_MONITOR_SCALES="${RELAY_TEST_SCALE:-1}"
+export RELAY_WAYLAND_NATIVE_TEST=headless-mutter-private-bus
+export RELAY_TEST_COMPOSITOR=headless-native
+export RELAY_TEST_VIRTUAL_MONITOR=1600x1200
 if [ "${RELAY_TEST_INPUT_TRANSPORT:-}" = eis ]; then
   # Upstream EIS topology traces distinguish a real keymap/device replacement
   # from a monitor-region change when the production input fence fires.
   export MUTTER_DEBUG=eis
 fi
-relay_outer_display=:89
 relay_owned_pids=()
 relay_cleanup() {
   relay_status=$?
@@ -61,34 +59,33 @@ org.freedesktop.impl.portal.ScreenCast=gnome
 org.freedesktop.impl.portal.RemoteDesktop=gnome
 PORTALS
 
-Xvfb "$relay_outer_display" -screen 0 1600x1200x24 -nolisten tcp \
-  > "$RELAY_NATIVE_EVIDENCE_DIR/xvfb.log" 2>&1 &
-relay_owned_pids+=("$!")
-for relay_attempt in {1..50}; do
-  if DISPLAY="$relay_outer_display" xdpyinfo >/dev/null 2>&1; then break; fi
-  sleep 0.1
-done
-DISPLAY="$relay_outer_display" xdpyinfo >/dev/null
-
 # Give activated settings/portal services the same isolated directories before
-# configuring the dummy compositor. Logical layout makes scale2 a real HiDPI
+# configuring the native compositor. Logical layout makes scale2 a real HiDPI
 # mapping test with unchanged physical pixel resolution.
 dbus-update-activation-environment XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME \
   XDG_SESSION_TYPE XDG_CURRENT_DESKTOP WAYLAND_DISPLAY GDK_BACKEND GTK_A11Y \
   NO_AT_BRIDGE LIBGL_ALWAYS_SOFTWARE GSK_RENDERER LANG LC_ALL
 gsettings set org.gnome.mutter experimental-features "['scale-monitor-framebuffer']"
 
-relay_mutter_args=(--wayland --no-x11 --wayland-display="$WAYLAND_DISPLAY")
-if mutter --help | rg -q -- '--nested'; then relay_mutter_args+=(--nested); fi
-DISPLAY="$relay_outer_display" GDK_BACKEND=x11 mutter "${relay_mutter_args[@]}" \
+unset DISPLAY
+relay_mutter_args=(--headless --wayland --no-x11 --wayland-display="$WAYLAND_DISPLAY" \
+  --virtual-monitor="$RELAY_TEST_VIRTUAL_MONITOR")
+mutter "${relay_mutter_args[@]}" \
   > "$RELAY_NATIVE_EVIDENCE_DIR/mutter.log" 2>&1 &
-relay_owned_pids+=("$!")
+export RELAY_TEST_MUTTER_PID="$!"
+relay_owned_pids+=("$RELAY_TEST_MUTTER_PID")
 for relay_attempt in {1..100}; do
   if test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"; then break; fi
   sleep 0.1
 done
 test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
-unset DISPLAY
+for relay_attempt in {1..50}; do
+  if gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+    --method org.freedesktop.DBus.GetNameOwner org.gnome.Mutter.DisplayConfig >/dev/null 2>&1; then break; fi
+  sleep 0.1
+done
+/usr/bin/python3 packages/device/test/manual/wayland-portal-smoke.py scale "${RELAY_TEST_SCALE:-1}" \
+  > "$RELAY_NATIVE_EVIDENCE_DIR/initial-layout.json"
 
 gsettings set org.gnome.desktop.interface toolkit-accessibility true
 gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \

@@ -202,7 +202,10 @@ class EisInput:
             self.session_check(ctx)
 
     def changed(self, kind, record):
-        self.generation += 1
+        # Keyboard maps are independently replaceable. Only an absolute device
+        # lifecycle changes the mapping between a screenshot and its EI region.
+        if record["virtual"] and 2 in record["caps"]:
+            self.generation += 1
         self.device_changes.append({"generation": self.generation,
             "event": {5: "added", 6: "removed", 7: "paused", 8: "resumed"}[kind],
             "capabilities": sorted(record["caps"]), "virtual": record["virtual"]})
@@ -379,6 +382,11 @@ class EisInput:
     def key(self, record, code, pressed, ctx, generation):
         self.check(ctx, generation, "keyboard-event")
         pointer = record["pointer"]
+        if (self.devices.get(pointer) is not record or not record["active"]
+                or record["keyboard"] is None):
+            # Event processing may have unref'd the device and keyboard map.
+            # Never dereference that old C state or replay an uncertain key.
+            raise Failure("keyboard_changed", "The compositor keyboard changed during a key transaction; remaining input was stopped.", {"mayHaveApplied": True})
         if pressed:
             self.held.append(("key", pointer, code))
         self.api.ei.ei_device_keyboard_key(pointer, code, pressed)
@@ -421,9 +429,10 @@ class EisInput:
             raise Failure("display_changed", "The EIS monitor region disappeared.")
         seat = mapped[0]["seat"]
         selected = mapped[0]
-        keyboard = self.device(4, seat, selected)
+        keyboard = None
         plan = None
         if kind in ("key", "text"):
+            keyboard = self.device(4, seat, selected)
             if keyboard is None:
                 raise Failure("input_unavailable", "The EIS keyboard is not active.")
             plan, baseline = keyboard["keyboard"].plan(symbols, text=kind == "text")
@@ -498,12 +507,27 @@ class EisInput:
             elif kind == "text":
                 # Validate the whole string above, then synchronize each owned
                 # modifier transaction. No clipboard and no implicit Enter/Tab.
-                for extra, code in plan:
+                for index, _symbol in enumerate(symbols):
                     self.sync(ctx)
                     self.check(ctx, generation, "text")
+                    current_keyboard = self.device(4, seat, selected)
+                    if current_keyboard is None:
+                        raise Failure("keyboard_changed", "The compositor keyboard disappeared during text input; remaining text was stopped.", {"mayHaveApplied": index > 0})
+                    if current_keyboard is not keyboard:
+                        # A previous character is already complete; never replay
+                        # it. The newly supplied map must be able to produce all
+                        # remaining characters before the next one is submitted.
+                        keyboard = current_keyboard
+                        try:
+                            remaining, baseline = keyboard["keyboard"].plan(symbols[index:], text=True)
+                        except Failure as error:
+                            error.details = dict(error.details or {}, mayHaveApplied=index > 0)
+                            raise
+                        plan[index:] = remaining
                     current = keyboard["keyboard"].mask()
                     if current != baseline:
                         raise Failure("keyboard_state_changed", "Keyboard modifiers or layout changed during text input; remaining text was not sent.", {"mayHaveApplied": True})
+                    extra, code = plan[index]
                     for modifier in extra:
                         self.key(keyboard, modifier, True, ctx, generation)
                     self.key(keyboard, code, True, ctx, generation)

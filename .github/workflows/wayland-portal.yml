@@ -2,7 +2,7 @@ name: Native Wayland portal
 
 on:
   push:
-    branches: [main, 'feat/wayland-*', 'fix/**']
+    branches: [main, 'fix/**']
     paths:
       - '.github/workflows/wayland-portal.yml'
       - 'packages/device/src/**'
@@ -79,12 +79,13 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            dbus dbus-x11 dbus-daemon dconf-cli mutter xvfb x11-utils ripgrep \
+            dbus dbus-x11 dbus-daemon dconf-cli mutter ripgrep \
             xdg-desktop-portal xdg-desktop-portal-gnome pipewire wireplumber \
             gstreamer1.0-pipewire gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
             python3-gi python3-gi-cairo python3-cairo python3-pyatspi python3-pil \
-            gir1.2-gtk-4.0 at-spi2-core adwaita-icon-theme fonts-dejavu-core libgl1-mesa-dri
+            gir1.2-gtk-4.0 at-spi2-core adwaita-icon-theme fonts-dejavu-core \
+            libgl1-mesa-dri libegl-mesa0 libgbm1
           if [ "${{ matrix.transport }}" = eis ]; then
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libei1 libxkbcommon0
             dpkg-query -W libei1 libxkbcommon0

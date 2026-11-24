@@ -119,12 +119,56 @@ class XkbPlanningTests(unittest.TestCase):
         self.assertEqual(keyboard.mask()[0], 0)
         self.render_plan(keyboard, "Aa!")
 
+    def test_replacement_map_replans_remaining_text_without_replaying_characters(self):
+        old_map, new_map = self.keyboard("us"), self.keyboard("de")
+        instance = EisContracts.bare(self)
+        selected = EisContracts.record(self, 9)
+        old_record = EisContracts.record(self, 10, caps=(4,))
+        new_record = EisContracts.record(self, 11, caps=(4,))
+        old_record["keyboard"], new_record["keyboard"] = old_map, new_map
+        instance.devices = {9: selected, 10: old_record}
+        instance.region = lambda mapping: (selected, (0, 0, 800, 600))
+        sync_count = 0
+        def sync(ctx):
+            nonlocal sync_count
+            ctx.check()
+            sync_count += 1
+            if sync_count == 3:  # First character was fully released.
+                self.assertEqual(instance.held, [])
+                old_record["active"] = False
+                instance.changed(6, old_record)
+                old_map.close()
+                del instance.devices[10]
+                instance.devices[11] = new_record
+                instance.changed(5, new_record)
+                instance.changed(8, new_record)
+        instance.sync = sync
+        actual = []
+        def send(pointer, code, pressed):
+            if pressed:
+                keyboard = instance.devices[pointer]["keyboard"]
+                symbol = keyboard.api.xkb.xkb_state_key_get_one_sym(keyboard.state, code + 8)
+                if 32 <= symbol <= 126:
+                    actual.append(chr(symbol))
+        instance.api = types.SimpleNamespace(ei=types.SimpleNamespace(
+            ei_device_keyboard_key=send, ei_device_frame=lambda *_: None,
+            ei_now=lambda _: 2000000, ei_dispatch=lambda _: None))
+        stream = {"mapping": "selected", "epoch": "session", "serial": 7, "node": 23,
+                  "display": {"id": "wayland:23", "width": 800, "height": 600, "rotation": 0}}
+        instance.display(stream)
+        text = "AYz!"
+        instance.act({"type": "text", "text": text}, stream, dict(stream["display"]),
+                     [ord(character) for character in text], Context(2000))
+        self.assertEqual("".join(actual), text)
+        self.assertEqual(instance.generation, 5)
+        self.assertEqual(instance.held, [])
+
 
 class EisContracts(unittest.TestCase):
     def bare(self):
         instance = EisInput.__new__(EisInput)
         instance.context, instance.connected, instance.generation = 1, True, 5
-        instance.devices, instance.held = {}, []
+        instance.devices, instance.held, instance.device_changes = {}, [], []
         instance.session_check = None
         instance.expected_ping, instance.pong_received = None, False
         instance.pump = lambda *_: None
@@ -142,6 +186,26 @@ class EisContracts(unittest.TestCase):
         self.assertIs(instance.device(16, 1, first), first)
         instance.devices = {3: physical}
         self.assertIsNone(instance.device(32, 1))
+
+    def test_keyboard_replacement_does_not_relabel_the_captured_monitor(self):
+        instance = self.bare()
+        keyboard, monitor = self.record(10, caps=(4,)), self.record(9)
+        for kind in (6, 5, 8):
+            instance.changed(kind, keyboard)
+        self.assertEqual(instance.generation, 5)
+        instance.changed(7, monitor)
+        self.assertEqual(instance.generation, 6)
+
+    def test_reused_c_pointer_never_reuses_an_old_keyboard_map(self):
+        instance = self.bare()
+        stale = self.record(10, caps=(4,))
+        stale["keyboard"] = object()
+        instance.devices[10] = self.record(10, caps=(4,))
+        with self.assertRaises(Failure) as caught:
+            instance.key(stale, 30, True, Context(2000), 5)
+        self.assertEqual(caught.exception.code, "keyboard_changed")
+        self.assertTrue(caught.exception.details["mayHaveApplied"])
+        self.assertEqual(instance.held, [])
 
     def test_live_region_offsets_and_extent_override_portal_start_size(self):
         instance = self.bare()

@@ -20,7 +20,9 @@ const outcome = <T>(promise: Promise<T>): Promise<Outcome<T>> =>
   promise.then(value => ({ ok: true as const, value }), error => ({ ok: false as const, error }));
 
 async function main(): Promise<void> {
-  assert.equal(process.env.RELAY_WAYLAND_NATIVE_TEST, "nested-mutter-private-bus");
+  assert.equal(process.env.RELAY_WAYLAND_NATIVE_TEST, "headless-mutter-private-bus");
+  assert.equal(process.env.RELAY_TEST_COMPOSITOR, "headless-native");
+  assert.equal(process.env.DISPLAY, undefined, "The native test has no outer X11 input backend");
   const evidence = process.env.RELAY_NATIVE_EVIDENCE_DIR!;
   assert.ok(evidence?.startsWith("/"), "Evidence must be outside the checkout");
   assert.equal(process.env.XDG_RUNTIME_DIR, evidence + "/runtime");
@@ -319,7 +321,7 @@ async function main(): Promise<void> {
       sourceRevision: process.env.GITHUB_SHA ?? null,
       harnessSha256: createHash("sha256").update(readFileSync(process.argv[1]!)).digest("hex"),
       fixtureSha256: createHash("sha256").update(readFileSync(fixtureScript)).digest("hex"),
-      compositor: "Mutter nested Wayland; no XWayland; real GNOME portal and PipeWire", scale: expectedScale };
+      compositor: "Mutter native headless backend with virtual monitor; no outer X11 or XWayland; real GNOME portal and PipeWire", scale: expectedScale };
     writeFileSync(join(evidence, "receipt.json"), JSON.stringify(receipt, null, 2) + "\n", { mode: 0o600 });
     process.stdout.write(JSON.stringify(receipt, null, 2) + "\n");
   } catch (error) {

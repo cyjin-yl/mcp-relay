@@ -14,7 +14,7 @@ import time
 
 
 def guard():
-    if os.environ.get("RELAY_WAYLAND_NATIVE_TEST") != "nested-mutter-private-bus":
+    if os.environ.get("RELAY_WAYLAND_NATIVE_TEST") != "headless-mutter-private-bus":
         raise RuntimeError("This harness requires its explicitly marked disposable desktop")
     runtime = os.environ.get("XDG_RUNTIME_DIR", "")
     evidence = os.environ.get("RELAY_NATIVE_EVIDENCE_DIR", "")
@@ -325,20 +325,25 @@ def png():
 
 
 def set_scale():
-    """Temporarily change only this harness's single dummy monitor."""
+    """Temporarily change only the owned native compositor's virtual monitor."""
     import gi
 
     gi.require_version("Gio", "2.0")
     from gi.repository import Gio, GLib
 
-    if (os.environ.get("MUTTER_DEBUG_NUM_DUMMY_MONITORS") != "1"
-            or os.environ.get("MUTTER_DEBUG_DUMMY_MODE_SPECS") != "1600x1200"):
-        raise RuntimeError("Scale tests require the owned single-monitor dummy compositor")
+    if (os.environ.get("RELAY_TEST_COMPOSITOR") != "headless-native"
+            or os.environ.get("RELAY_TEST_VIRTUAL_MONITOR") != "1600x1200"):
+        raise RuntimeError("Scale tests require the owned native headless compositor")
     desired = float(sys.argv[2])
     if desired not in (1.0, 2.0):
         raise RuntimeError("Only the two native test scales are allowed")
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     service, path = "org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig"
+    owner_pid = bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus",
+        "org.freedesktop.DBus", "GetConnectionUnixProcessID", GLib.Variant("(s)", (service,)),
+        GLib.VariantType.new("(u)"), Gio.DBusCallFlags.NO_AUTO_START, 3000, None).unpack()[0]
+    if owner_pid != int(os.environ.get("RELAY_TEST_MUTTER_PID", "0")):
+        raise RuntimeError("Refusing to change a compositor that the harness did not launch")
 
     def call(method, values=None):
         return bus.call_sync(service, path, service, method, values, None,
@@ -347,14 +352,14 @@ def set_scale():
     def describe(state):
         serial, monitors, logicals, properties = state
         if len(monitors) != 1 or len(logicals) != 1:
-            raise RuntimeError("Refusing to change a desktop other than the single dummy monitor")
+            raise RuntimeError("Refusing to change a desktop other than the single virtual monitor")
         spec, modes, _properties = monitors[0]
         active = [mode for mode in modes if mode[6].get("is-current") is True]
         if len(active) != 1 or tuple(active[0][1:3]) != (1600, 1200):
             raise RuntimeError("Refusing to change an unexpected physical monitor mode")
         logical = logicals[0]
         if tuple(logical[:2]) != (0, 0) or logical[3] != 0 or logical[5] != [spec]:
-            raise RuntimeError("Unexpected dummy monitor topology")
+            raise RuntimeError("Unexpected native virtual monitor topology")
         if desired not in active[0][5]:
             raise RuntimeError("The actual compositor does not advertise the requested test scale")
         return serial, spec, active[0], logical, properties
