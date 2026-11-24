@@ -63,6 +63,10 @@ export interface CapturedScreen {
 
 export interface ComputerBackend {
   readonly id: string;
+  /** Setup owns permission handles which must live in the connected worker. */
+  readonly setupInWorker?: boolean;
+  /** Close session-scoped resources; a later explicit setup may open a new session. */
+  close?(): Promise<void>;
   /** Explicit setup only; inspecting capabilities must never install or grant permissions. */
   setup?(context: NativeContext): Promise<Record<string, unknown>>;
   inspect(context: NativeContext, displayId?: string): Promise<ComputerState>;

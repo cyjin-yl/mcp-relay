@@ -177,6 +177,7 @@ normal command execution must not open a PowerShell/Terminal window.
 | Windows | Win32 capture, physical display coordinates, SendInput and UTF-16 text | Interactive user session; PowerShell 7 or Windows PowerShell 5.1 |
 | macOS (primary screen) | Quartz/JXA input, screencapture, Retina coordinate conversion | Aqua desktop; locally granted Screen Recording and Accessibility permissions |
 | Linux X11 | ImageMagick capture; XTEST via xdotool | Intended DISPLAY/XAUTHORITY; ImageMagick and xdotool |
+| Linux Wayland | RemoteDesktop and ScreenCast portals; authorized PipeWire PNG capture and portal keyboard/pointer input | Desktop session bus; distribution Python with PyGObject/GStreamer; PipeWire capture plugin; a portal backend providing both interfaces; explicit local consent |
 | Proxmox local QEMU VMs | Host VM discovery and QEMU virtual-console capture/input | PVE host access to qm and the selected VM's monitor; a guest virtual display |
 | Android | su, screencap, input, rotation checks, signed Unicode IME | Existing authorized su; system toybox timeout; Android 6+ for the bridge |
 
@@ -184,16 +185,72 @@ Windows Session 0, locked/secure desktops, headless systems, and missing permiss
 are reported explicitly. The implementation does not change UAC, SELinux, lock-screen
 settings, or permission databases. Protected applications may refuse capture/input.
 
-Wayland is detected separately. This release does not treat XWayland as full-desktop
-control; it reports the need for a compositor-approved RemoteDesktop portal backend.
+Wayland uses the portal backend even when DISPLAY also names an XWayland server.
 It does not bypass portal consent or enable compositor unsafe/debug modes.
 
 macOS secondary displays are listed for diagnosis but capture/input are refused in this release, because native screenshot numbering has not been verified against display IDs.
 
-Linux Unicode input uses paced XTEST key mapping. Native acceptance covers Chinese,
+Linux X11 Unicode input uses paced XTEST key mapping. Native acceptance covers Chinese,
 ASCII, and supplementary Unicode in a real test widget. Target application input
 handling can still differ; an input submission receipt is not proof of the intended
 application result.
+
+### Wayland permission sessions
+
+Run relay in the intended user's graphical session. It needs that session's
+WAYLAND_DISPLAY, XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS. A background service
+without those desktop connections cannot discover or control another user's session.
+The bundled helper uses the distribution Python at /usr/bin/python3 when present;
+install PyGObject and GStreamer for that interpreter, not only in a virtual environment.
+Required GStreamer elements are pipewiresrc, videoconvert, capsfilter, pngenc and appsink.
+On Debian/Ubuntu the relevant packages include python3-gi,
+gir1.2-gstreamer-1.0, gstreamer1.0-pipewire, gstreamer1.0-plugins-base and
+gstreamer1.0-plugins-good, plus PipeWire, xdg-desktop-portal and the backend for the
+active desktop. A compositor exposing ScreenCast without RemoteDesktop is reported
+as unavailable for input; relay does not fall back to XWayland control.
+
+1. Enable the computer pack using the existing local opt-in.
+2. Call computer_info to inspect dependencies and portal capabilities. This does not
+   prompt, select a monitor, or grant a permission.
+3. Call computer_setup on the **connected worker** with `{"timeout_ms":120000}`.
+   The local desktop user selects one to eight existing monitors and approves
+   keyboard and pointer access in the system dialog. Cancelling leaves control
+   unavailable. The one-shot `computer-setup` CLI reports that setup must occur in
+   the worker: an OS permission handle cannot be transferred between those processes.
+4. Inspect the returned display IDs, then capture with the selected display_id.
+   Multiple shared monitors require explicit selection. Send actions using the
+   returned frame_id and screenshot pixel coordinates, as for other platforms.
+
+Each capture opens a fresh authorized PipeWire connection and encodes its current
+frame as PNG. It does not reuse a screenshot cached before an input operation.
+Display identity includes the permission session and stream identity. Before input,
+the helper rechecks the capture dimensions and rejects stale geometry. The portal's
+logical monitor size supplies the screenshot-to-input scale; ambiguous or missing
+geometry fails closed.
+
+Permissions last only for the current worker connection. Disconnecting, pausing,
+disabling computer control, cancelling a request, losing the portal, or leaving the
+helper idle for five minutes releases the session. A local pause/resume pair also
+invalidates it through the settings revision. After reconnect or resume, explicitly
+run computer_setup and capture a new frame. Restore tokens are not saved, no system
+permission database is modified, and the helper has no listening network socket.
+Held keys and buttons are released on cancellation where the portal remains available;
+closing the DBus connection also ends the compositor's remote input session.
+
+Wayland text supports **printable ASCII only**. Unsupported Unicode and control
+characters are rejected before any input, including embedded newline and tab;
+use explicit key actions for Enter or Tab. No clipboard is read or changed. Key
+submission still needs a follow-up screenshot to verify the application result.
+
+This portal path operates the selected foreground monitor. Isolated Linux workspaces
+remain the existing Xpra/Xvfb provider and still need a verified X11/XWayland return
+target for the application-preserving handoff. A portal virtual-monitor capability
+alone does not establish isolated input, application routing or safe window recovery.
+
+Protocol references: [RemoteDesktop](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html),
+[ScreenCast](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html),
+[Request lifecycle](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html)
+and [Session lifecycle](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Session.html).
 
 ## Proxmox VM consoles
 

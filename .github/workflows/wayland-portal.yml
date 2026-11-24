@@ -1,0 +1,81 @@
+name: Native Wayland portal
+
+on:
+  push:
+    branches: [main, 'feat/wayland-*', 'fix/**']
+    paths:
+      - '.github/workflows/wayland-portal.yml'
+      - 'packages/device/src/**'
+      - 'packages/device/test/**'
+      - 'packages/shared/**'
+      - 'scripts/build-wayland-portal-tests.mjs'
+      - 'package-lock.json'
+  pull_request:
+    paths:
+      - '.github/workflows/wayland-portal.yml'
+      - 'packages/device/src/**'
+      - 'packages/device/test/**'
+      - 'packages/shared/**'
+      - 'scripts/build-wayland-portal-tests.mjs'
+      - 'package-lock.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-wayland-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  portal:
+    name: Real GNOME portal, native Wayland, scale ${{ matrix.scale }}
+    runs-on: ubuntu-latest
+    container: node:22-bookworm
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        scale: [1, 2]
+    env:
+      RELAY_TEST_SCALE: ${{ matrix.scale }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install actual compositor, portal, PipeWire and GTK fixture
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            dbus dbus-x11 dbus-daemon dconf-cli mutter xvfb x11-utils ripgrep \
+            xdg-desktop-portal xdg-desktop-portal-gnome pipewire wireplumber \
+            gstreamer1.0-pipewire gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+            python3-gi python3-gi-cairo python3-cairo python3-pyatspi python3-pil \
+            gir1.2-gtk-4.0 at-spi2-core adwaita-icon-theme fonts-dejavu-core libgl1-mesa-dri
+          dpkg-query -W mutter xdg-desktop-portal xdg-desktop-portal-gnome pipewire \
+            gstreamer1.0-pipewire python3-gi libgtk-4-1
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - name: Verify transport, ownership and native helper contracts
+        run: |
+          npm test -- --maxWorkers=2
+          python3 packages/device/test/wayland-helper.test.py
+      - name: Build the production TypeScript backend into the native harness
+        run: node scripts/build-wayland-portal-tests.mjs
+      - name: Exercise real consent, capture, input and session loss
+        run: |
+          export RELAY_NATIVE_EVIDENCE_DIR="$RUNNER_TEMP/relay-wayland-native"
+          mkdir -p "$RELAY_NATIVE_EVIDENCE_DIR"
+          relay_native_exit=0
+          dbus-run-session -- bash packages/device/test/manual/wayland-portal-smoke.sh \
+            > "$RELAY_NATIVE_EVIDENCE_DIR/session.log" 2>&1 || relay_native_exit=$?
+          cat "$RELAY_NATIVE_EVIDENCE_DIR/session.log"
+          exit "$relay_native_exit"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: wayland-portal-native-scale-${{ matrix.scale }}
+          path: ${{ runner.temp }}/relay-wayland-native
+          if-no-files-found: warn
+          retention-days: 14

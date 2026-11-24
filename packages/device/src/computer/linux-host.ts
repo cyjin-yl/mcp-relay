@@ -63,7 +63,8 @@ export function createLinuxHostBackend(options: LinuxHostBackendOptions = {}): C
     };
   }
   return {
-    id: "linux-host+pve-qmp", inspect,
+    id: "linux-host+pve-qmp", inspect, setupInWorker: desktop.setupInWorker,
+    close: async () => { await Promise.all([desktop.close?.(), pve?.close?.()]); },
     async screenshot(displayId, context) {
       if (virtual(displayId)) return pve!.screenshot(displayId, context);
       if (displayId !== undefined) return desktop.screenshot(displayId, context);
@@ -77,7 +78,8 @@ export function createLinuxHostBackend(options: LinuxHostBackendOptions = {}): C
       return (virtual(display.id) ? pve! : desktop).act(action, display, context);
     },
     async setup(context) {
-      return { state: await inspect(context), automaticInstall: false };
+      const setup = desktop.setup ? await desktop.setup(context) : {};
+      return { ...setup, state: await inspect(context), automaticInstall: false };
     }
   };
 }
