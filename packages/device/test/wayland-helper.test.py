@@ -9,8 +9,9 @@ import types
 import unittest
 from unittest.mock import patch
 
-SOURCE = (Path(__file__).parents[1] / "src/computer/wayland-helper.ts").read_text()
-HELPER = SOURCE.split("String.raw`", 1)[1].rsplit("`;", 1)[0]
+COMPUTER = Path(__file__).parents[1] / "src/computer"
+HELPER = "\n".join((COMPUTER / name).read_text().split("String.raw`", 1)[1].rsplit("`;", 1)[0]
+                   for name in ("wayland-eis-helper.ts", "wayland-layout-helper.ts", "wayland-helper.ts"))
 MODULE = {"__name__": "wayland_helper_test"}
 exec(compile(HELPER, "embedded-wayland-helper.py", "exec"), MODULE)
 Failure, Context, Portal = (MODULE[name] for name in ("Failure", "Context", "Portal"))
@@ -44,6 +45,7 @@ class HelperInputTests(unittest.TestCase):
         self.events = []
         self.portal.notify = lambda method, signature, arguments, ctx: self.events.append((method, arguments))
         self.portal.bus = FakeBus()
+        self.portal.layout = types.SimpleNamespace(available=True, reason="Fixture layout", check=lambda ctx: ctx.check(), close=lambda: None)
         self.globals = patch.dict(MODULE, {
             "Gio": types.SimpleNamespace(DBusCallFlags=types.SimpleNamespace(NONE=0)),
             "GLib": types.SimpleNamespace(Variant=lambda signature, values: (signature, values)),

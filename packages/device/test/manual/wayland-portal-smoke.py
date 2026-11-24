@@ -324,6 +324,66 @@ def png():
     print(json.dumps({"width": image.width, "height": image.height, "samples": samples}))
 
 
+def set_scale():
+    """Temporarily change only this harness's single dummy monitor."""
+    import gi
+
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio, GLib
+
+    if (os.environ.get("MUTTER_DEBUG_NUM_DUMMY_MONITORS") != "1"
+            or os.environ.get("MUTTER_DEBUG_DUMMY_MODE_SPECS") != "1600x1200"):
+        raise RuntimeError("Scale tests require the owned single-monitor dummy compositor")
+    desired = float(sys.argv[2])
+    if desired not in (1.0, 2.0):
+        raise RuntimeError("Only the two native test scales are allowed")
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    service, path = "org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig"
+
+    def call(method, values=None):
+        return bus.call_sync(service, path, service, method, values, None,
+                             Gio.DBusCallFlags.NO_AUTO_START, 3000, None).unpack()
+
+    def describe(state):
+        serial, monitors, logicals, properties = state
+        if len(monitors) != 1 or len(logicals) != 1:
+            raise RuntimeError("Refusing to change a desktop other than the single dummy monitor")
+        spec, modes, _properties = monitors[0]
+        active = [mode for mode in modes if mode[6].get("is-current") is True]
+        if len(active) != 1 or tuple(active[0][1:3]) != (1600, 1200):
+            raise RuntimeError("Refusing to change an unexpected physical monitor mode")
+        logical = logicals[0]
+        if tuple(logical[:2]) != (0, 0) or logical[3] != 0 or logical[5] != [spec]:
+            raise RuntimeError("Unexpected dummy monitor topology")
+        if desired not in active[0][5]:
+            raise RuntimeError("The actual compositor does not advertise the requested test scale")
+        return serial, spec, active[0], logical, properties
+
+    before = describe(call("GetCurrentState"))
+    serial, spec, mode, logical, properties = before
+    options = {}
+    if properties.get("supports-changing-layout-mode") is True:
+        options["layout-mode"] = GLib.Variant("u", 1)
+    elif properties.get("layout-mode", 1) != 1:
+        raise RuntimeError("The test requires an actual compositor logical layout")
+    # Method1 is temporary, never a persistent monitor configuration.
+    call("ApplyMonitorsConfig", GLib.Variant("(uua(iiduba(ssa{sv}))a{sv})",
+        (serial, 1, [(0, 0, desired, 0, True, [(spec[0], mode[0], {})])], options)))
+    deadline = time.monotonic() + 5
+    while True:
+        after = describe(call("GetCurrentState"))
+        if after[3][2] == desired:
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError("The compositor did not apply its advertised scale")
+        time.sleep(0.05)
+    print(json.dumps({"ok": True, "scaleBefore": logical[2], "scaleAfter": after[3][2],
+                      "serialBefore": serial, "serialAfter": after[0],
+                      "physicalBefore": list(mode[1:3]), "physicalAfter": list(after[2][1:3]),
+                      "modeUnchanged": mode[0] == after[2][0],
+                      "layoutMode": after[4].get("layout-mode", 1)}), flush=True)
+
+
 if __name__ == "__main__":
     guard()
     mode = sys.argv[1]
@@ -333,5 +393,7 @@ if __name__ == "__main__":
         consent(mode)
     elif mode == "png":
         png()
+    elif mode == "scale":
+        set_scale()
     else:
         raise RuntimeError("Unsupported harness mode")

@@ -1,5 +1,8 @@
+import { waylandEisHelper } from "./wayland-eis-helper.js";
+import { waylandLayoutHelper } from "./wayland-layout-helper.js";
+
 /** Desktop-approved Wayland capture/input. The portal grant lives only in this child. */
-export const waylandHelper = String.raw`#!/usr/bin/env python3
+export const waylandHelper = waylandEisHelper + waylandLayoutHelper + String.raw`#!/usr/bin/env python3
 import base64
 import json
 import math
@@ -175,6 +178,11 @@ class Portal:
         self.streams = []
         self.held_keys = []
         self.held_buttons = []
+        self.eis = None
+        self.layout = None
+        self.eis_generation = None
+        self.needs_setup = False
+        self.input_reason = "Authorize a desktop session before sending input."
         self.remote_properties = {}
         self.screen_properties = {}
         self.permission = "unknown"
@@ -190,6 +198,11 @@ class Portal:
 
     def notify(self, method, signature, arguments, ctx):
         self.require_session(ctx)
+        if self.eis is not None:
+            raise Failure("input_transport_changed", "Notify input is forbidden after connecting EIS.")
+        if self.layout is None:
+            raise Failure("input_unavailable", self.input_reason)
+        self.layout.check(ctx)
         self.call(REMOTE, method, GLib.Variant(signature, (self.session, {}, *arguments)), ctx, maximum=250)
         self.require_session(ctx)
 
@@ -305,6 +318,8 @@ class Portal:
             pass
 
     def release_inputs(self):
+        if self.eis is not None:
+            return self.eis.release()
         clean = True
         buttons, keys = list(reversed(self.held_buttons)), list(reversed(self.held_keys))
         self.held_buttons.clear()
@@ -322,6 +337,14 @@ class Portal:
     def close(self, release=True):
         if release:
             self.release_inputs()
+        if self.eis is not None:
+            self.eis.close()
+            self.eis = None
+        if self.layout is not None:
+            self.layout.close()
+            self.layout = None
+        self.eis_generation = None
+        self.needs_setup = False
         self.active = False
         if self.permission == "granted":
             self.permission = "unknown"
@@ -342,6 +365,51 @@ class Portal:
         if not self.active or self.revoked.is_set() or not self.session:
             raise Failure("portal_session_required", "Run computer_setup and approve sharing in the local desktop before capturing or sending input.")
 
+    def input_available(self, ctx):
+        if not self.active or self.revoked.is_set():
+            return False
+        if self.eis is not None:
+            try:
+                self.eis.pump()
+                if self.eis_generation is not None and self.eis_generation != self.eis.generation:
+                    self.needs_setup = True
+                self.eis_generation = self.eis.generation
+                if not self.eis.ready(self.streams):
+                    self.input_reason = "EIS devices or monitor regions are not ready. Capture again after the desktop settles, or reauthorize with computer_setup."
+                    return False
+                for stream in self.streams:
+                    self.eis.display(stream)
+                return True
+            except Exception:
+                self.close()
+                raise
+        if self.layout is not None:
+            try:
+                self.layout.check(ctx)
+                return True
+            except Failure as error:
+                if error.code in ("cancelled", "timeout"):
+                    raise
+                self.needs_setup = True
+                self.input_reason = error.message
+        return False
+
+    def require_input(self, ctx):
+        self.require_session(ctx)
+        if not self.input_available(ctx):
+            raise Failure("input_unavailable", self.input_reason)
+
+    def poll(self):
+        if self.revoked.is_set() and (self.session is not None or self.eis is not None):
+            self.close()
+            return
+        if self.eis is not None:
+            try:
+                self.eis.pump()
+            except Exception:
+                self.last_reason = "The compositor input connection closed. Run computer_setup to authorize a new session."
+                self.close()
+
     def state(self, ctx, probe=True):
         failure = None
         if probe:
@@ -353,20 +421,31 @@ class Portal:
                 failure = error
                 if self.active:
                     self.close()
+        input_available = False
+        if failure is None and self.active and not self.revoked.is_set():
+            try:
+                input_available = self.input_available(ctx)
+            except Failure as error:
+                if error.code in ("cancelled", "timeout"):
+                    raise
+                failure = error
         available = failure is None and self.active and not self.revoked.is_set() and bool(self.streams)
         details = {
-            "setupRequired": not available,
+            "setupRequired": not available or not input_available,
             "setup": "Use computer_setup to approve monitor sharing and remote input in the local desktop dialog.",
-            "coordinateSpace": "Captured monitor pixels mapped to the portal's logical monitor coordinates",
+            "coordinateSpace": "Captured monitor pixels mapped to a live EIS region; legacy Notify is restricted to guarded GNOME scale-1 monitors",
             "capture": "Fresh authorized PipeWire connection for each screenshot; no cached pre-action frames",
             "sessionPersistence": "None; permission is released on helper exit, disconnect, handoff or five idle minutes",
-            "inputMethod": "RemoteDesktop Notify methods (no EIS connection)",
-            "textSupport": "Printable ASCII only; Enter and Tab require explicit key actions. Application keyboard handling may vary.",
+            "inputTransport": "eis" if self.eis is not None else "gnome-legacy" if input_available else "none",
+            "inputMethod": "EIS/libei with compositor XKB map" if self.eis is not None else "RemoteDesktop Notify with live GNOME layout guard" if input_available else "capture-only",
+            "textSupport": "Printable ASCII representable by the active keyboard map with unmodified or Shift keys; Enter and Tab require explicit key actions. Application keyboard handling and concurrent local input may vary.",
             "clipboardAccess": False,
             "xwaylandIgnored": bool(os.environ.get("DISPLAY")),
             "remoteDesktopVersion": self.remote_properties.get("version"),
             "screenCastVersion": self.screen_properties.get("version"),
         }
+        if available and not input_available:
+            details["inputReason"] = self.input_reason
         if failure:
             details["errorCode"] = failure.code
             if failure.details:
@@ -374,12 +453,12 @@ class Portal:
         state = {
             "platform": "linux", "backend": "linux-wayland-portal", "available": available,
             "displayKind": "physical" if available else "none",
-            "inputKind": "mouse_keyboard" if available else "none",
+            "inputKind": "mouse_keyboard" if input_available else "none",
             "displays": [dict(stream["display"]) for stream in self.streams] if available else [],
-            "actions": ["move", "click", "drag", "scroll", "key", "text"] if available else [],
+            "actions": ["move", "click", "drag", "scroll", "key", "text"] if input_available else [],
             "unicodeText": False,
             "permissions": {"screenCapture": "granted" if available else self.permission,
-                            "input": "granted" if available else self.permission, "unlocked": "unknown"},
+                            "input": "granted" if input_available else "denied" if available else self.permission, "unlocked": "unknown"},
             "details": details,
         }
         if not available:
@@ -388,9 +467,14 @@ class Portal:
 
     def setup(self, ctx):
         if self.active and not self.revoked.is_set():
-            return {"state": self.state(ctx), "automaticInstall": False}
+            current = self.state(ctx)
+            if current["inputKind"] != "none" and not self.needs_setup:
+                return {"state": current, "automaticInstall": False}
         self.close()
         self.probe(ctx)
+        # Freeze legacy display identity before any consent dialog can open.
+        # EIS later replaces this guard with its own live region identities.
+        self.layout = LegacyLayout(self, ctx)
         self.permission = "unknown"
         self.revoked.clear()
         self.epoch = uuid.uuid4().hex
@@ -440,17 +524,57 @@ class Portal:
                     raise Failure("portal_protocol", "Only existing monitor streams are supported by foreground Wayland control.")
                 logical = properties.get("logical_size", properties.get("size"))
                 if not isinstance(logical, (list, tuple)) or len(logical) != 2 or not all(integer(x, 1, 32768) for x in logical):
-                    raise Failure("unsupported_geometry", "The desktop must report the monitor's logical size for accurate pointer coordinates.")
+                    logical = None
+                position = properties.get("position")
+                if not isinstance(position, (list, tuple)) or len(position) != 2 or not all(integer(x, -0x80000000, 0x7fffffff) for x in position):
+                    position = None
+                mapping = properties.get("mapping_id")
+                if not isinstance(mapping, str) or not 1 <= len(mapping) <= 512:
+                    mapping = None
                 serial = properties.get("pipewire-serial")
                 if serial is not None and not integer(serial, 1, 0xffffffffffffffff):
                     raise Failure("portal_protocol", "The desktop returned an invalid PipeWire stream serial.")
-                self.streams.append({"node": node, "serial": serial, "logical": logical,
+                self.streams.append({"node": node, "serial": serial, "logical": logical, "position": position,
+                    "mapping": mapping, "epoch": self.epoch,
                     "display": {"id": "wayland:" + str(node), "instanceId": self.epoch + ":" + str(serial or node),
-                        "x": 0, "y": 0, "width": logical[0], "height": logical[1], "scaleX": 1, "scaleY": 1,
+                        "x": 0, "y": 0, "width": logical[0] if logical else 1, "height": logical[1] if logical else 1, "scaleX": 1, "scaleY": 1,
                         "rotation": 0, "primary": len(seen) == 1, "name": "Portal monitor " + str(len(seen))}})
             self.active = True
             for stream in self.streams:
                 self.capture(stream, ctx)
+            candidate = None
+            mappings = [stream["mapping"] for stream in self.streams]
+            if self.remote_properties.get("version", 0) >= 2 and all(mappings) and len(set(mappings)) == len(mappings):
+                try:
+                    candidate = EisInput()
+                except (OSError, AttributeError):
+                    self.input_reason = "Install a libei build with monitor mapping and ping support, plus libxkbcommon, for EIS input."
+            if candidate is not None:
+                self.layout.close()
+                self.layout = None
+                self.eis = candidate
+                self.eis.session_check = self.require_session
+                try:
+                    result, descriptors = self.bus.call_with_unix_fd_list_sync(PORTAL, DESKTOP, REMOTE,
+                        "ConnectToEIS", GLib.Variant("(oa{sv})", (self.session, {})), GLib.VariantType.new("(h)"),
+                        Gio.DBusCallFlags.NONE, ctx.remaining(1000), None, None)
+                    handle = result.unpack()[0]
+                    if descriptors is None or not integer(handle, 0, descriptors.get_length() - 1):
+                        raise Failure("portal_protocol", "The portal did not provide a valid EIS file descriptor.")
+                    fd = descriptors.get(handle)
+                    descriptors = None
+                    self.eis.connect(fd, self.streams, ctx)
+                    self.eis_generation = self.eis.generation
+                    for stream in self.streams:
+                        self.eis.display(stream)
+                except Failure:
+                    raise
+                except Exception:
+                    ctx.check()
+                    raise Failure("eis_unavailable", "The desktop EIS input connection failed; its portal grant was closed.")
+            else:
+                self.layout.bind(ctx)
+                self.input_reason = self.layout.reason
             self.require_session(ctx)
             self.permission = "granted"
             return {"state": self.state(ctx, probe=False), "automaticInstall": False}
@@ -471,9 +595,13 @@ class Portal:
 
     def capture(self, stream, ctx):
         self.require_session(ctx)
+        eis_generation = None
         pipeline = None
         fd = None
         try:
+            if self.eis is not None:
+                self.eis.pump()
+                eis_generation = self.eis.generation
             # The handle in the D-Bus reply is an INDEX into UnixFDList. It is
             # never a process fd. get() gives us a caller-owned duplicate.
             result, fd_list = self.bus.call_with_unix_fd_list_sync(PORTAL, DESKTOP, SCREEN,
@@ -522,16 +650,25 @@ class Portal:
                     data = buffer.extract_dup(0, buffer.get_size())
                     width, height = png_geometry(data)
                     self.require_session(ctx)
+                    logical = stream["logical"]
                     stream["display"].update(width=width, height=height,
-                        scaleX=width / stream["logical"][0], scaleY=height / stream["logical"][1])
+                        scaleX=width / logical[0] if logical else 1, scaleY=height / logical[1] if logical else 1)
+                    if self.eis is not None:
+                        self.eis.check(ctx, eis_generation)
+                        self.eis.display(stream)
                     return {"data": base64.b64encode(data).decode("ascii"), "mimeType": "image/png",
                         "display": dict(stream["display"]), "capturedAt": int(time.time() * 1000)}
                 message = bus.pop_filtered(Gst.MessageType.ERROR | Gst.MessageType.EOS)
                 if message is not None:
                     raise Failure("capture_failed", "The PipeWire stream stopped before a screenshot was available.")
-        except Failure:
+        except Failure as error:
+            if error.code != "display_changed":
+                self.close()
+            else:
+                self.needs_setup = True
             raise
         except Exception:
+            self.close()
             ctx.check()
             raise Failure("capture_failed", "Could not capture the selected authorized Wayland monitor.")
         finally:
@@ -547,6 +684,7 @@ class Portal:
         if not isinstance(display, dict):
             raise Failure("invalid_display", "Wayland input needs a captured monitor identity.")
         stream = self.stream(display.get("id"), ctx)
+        self.require_input(ctx)
         if display.get("instanceId") != stream["display"]["instanceId"]:
             raise Failure("display_changed", "The Wayland session changed; capture a new frame.")
         expected = {key: display.get(key) for key in ("id", "instanceId", "x", "y", "width", "height", "scaleX", "scaleY", "rotation")}
@@ -558,6 +696,18 @@ class Portal:
         self.capture(stream, ctx)
         if any(expected[key] != stream["display"][key] for key in expected):
             raise Failure("display_changed", "The Wayland monitor geometry changed; capture a new frame.")
+        if self.eis is not None:
+            try:
+                return self.eis.act(action, stream, display, symbols, ctx)
+            except Failure as error:
+                if error.code == "display_changed":
+                    self.needs_setup = True
+                elif error.code not in ("keyboard_modifiers_active", "keymap_character_unsupported", "keyboard_state_changed"):
+                    self.close()
+                raise
+            except Exception:
+                self.close()
+                raise
         kind = action["type"]
         def move(x, y):
             self.notify("NotifyPointerMotionAbsolute", "(oa{sv}udd)",
@@ -674,6 +824,7 @@ def run():
                 try:
                     request = work.get(timeout=0.1)
                 except queue.Empty:
+                    portal.poll()
                     if portal.active and time.monotonic() - last_activity >= IDLE_SECONDS:
                         portal.close()
                         portal.last_reason = "The Wayland session expired after five idle minutes. Run computer_setup to authorize a new session."

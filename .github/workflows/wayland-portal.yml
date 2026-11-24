@@ -28,17 +28,49 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  portal:
-    name: Real GNOME portal, native Wayland, scale ${{ matrix.scale }}
+  contracts:
+    name: TypeScript and embedded helper contracts
     runs-on: ubuntu-latest
     container: node:22-bookworm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install Python and compositor keymap test runtime
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 libxkbcommon0 xkb-data
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - name: Verify transport, ownership and helper lifecycle
+        run: |
+          npm test -- --maxWorkers=2
+          for relay_helper_test in packages/device/test/wayland-*.test.py; do
+            python3 "$relay_helper_test"
+          done
+  portal:
+    name: Native ${{ matrix.transport }}, ${{ matrix.distribution }}, scale ${{ matrix.scale }}
+    runs-on: ubuntu-latest
+    container: node:22-${{ matrix.distribution }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        scale: [1, 2]
+        include:
+          - distribution: bookworm
+            transport: gnome-legacy
+            scale: 1
+          - distribution: trixie
+            transport: eis
+            scale: 1
+          - distribution: trixie
+            transport: eis
+            scale: 2
     env:
       RELAY_TEST_SCALE: ${{ matrix.scale }}
+      RELAY_TEST_INPUT_TRANSPORT: ${{ matrix.transport }}
+      RELAY_NATIVE_EVIDENCE_DIR: /tmp/relay-wayland-native
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -53,19 +85,17 @@ jobs:
             gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
             python3-gi python3-gi-cairo python3-cairo python3-pyatspi python3-pil \
             gir1.2-gtk-4.0 at-spi2-core adwaita-icon-theme fonts-dejavu-core libgl1-mesa-dri
+          if [ "${{ matrix.transport }}" = eis ]; then
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libei1 libxkbcommon0
+            dpkg-query -W libei1 libxkbcommon0
+          fi
           dpkg-query -W mutter xdg-desktop-portal xdg-desktop-portal-gnome pipewire \
             gstreamer1.0-pipewire python3-gi libgtk-4-1
       - run: npm ci --no-audit --no-fund
-      - run: npm run typecheck
-      - name: Verify transport, ownership and native helper contracts
-        run: |
-          npm test -- --maxWorkers=2
-          python3 packages/device/test/wayland-helper.test.py
       - name: Build the production TypeScript backend into the native harness
         run: node scripts/build-wayland-portal-tests.mjs
       - name: Exercise real consent, capture, input and session loss
         run: |
-          export RELAY_NATIVE_EVIDENCE_DIR="$RUNNER_TEMP/relay-wayland-native"
           mkdir -p "$RELAY_NATIVE_EVIDENCE_DIR"
           relay_native_exit=0
           dbus-run-session -- bash packages/device/test/manual/wayland-portal-smoke.sh \
@@ -75,11 +105,11 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: wayland-portal-native-scale-${{ matrix.scale }}
+          name: wayland-portal-${{ matrix.transport }}-${{ matrix.distribution }}-scale-${{ matrix.scale }}
           path: |
-            ${{ runner.temp }}/relay-wayland-native/*.log
-            ${{ runner.temp }}/relay-wayland-native/*.json
-            ${{ runner.temp }}/relay-wayland-native/*.png
-            ${{ runner.temp }}/relay-wayland-native/*version.txt
+            /tmp/relay-wayland-native/*.log
+            /tmp/relay-wayland-native/*.json
+            /tmp/relay-wayland-native/*.png
+            /tmp/relay-wayland-native/*version.txt
           if-no-files-found: warn
           retention-days: 14

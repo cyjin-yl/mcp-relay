@@ -35,6 +35,14 @@ export MUTTER_DEBUG_DUMMY_MONITOR_SCALES="${RELAY_TEST_SCALE:-1}"
 relay_outer_display=:89
 relay_owned_pids=()
 relay_cleanup() {
+  relay_status=$?
+  if [ "$relay_status" -ne 0 ]; then
+    for relay_log in failure.json portal.log portal-gnome.log pipewire.log wireplumber.log gstreamer.log mutter.log; do
+      if test -f "$RELAY_NATIVE_EVIDENCE_DIR/$relay_log"; then
+        tail -n 80 "$RELAY_NATIVE_EVIDENCE_DIR/$relay_log"
+      fi
+    done
+  fi
   for relay_pid in "${relay_owned_pids[@]}"; do
     kill "$relay_pid" 2>/dev/null || true
   done
@@ -57,6 +65,14 @@ for relay_attempt in {1..50}; do
 done
 DISPLAY="$relay_outer_display" xdpyinfo >/dev/null
 
+# Give activated settings/portal services the same isolated directories before
+# configuring the dummy compositor. Logical layout makes scale2 a real HiDPI
+# mapping test with unchanged physical pixel resolution.
+dbus-update-activation-environment XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME \
+  XDG_SESSION_TYPE XDG_CURRENT_DESKTOP WAYLAND_DISPLAY GDK_BACKEND GTK_A11Y \
+  NO_AT_BRIDGE LIBGL_ALWAYS_SOFTWARE GSK_RENDERER LANG LC_ALL
+gsettings set org.gnome.mutter experimental-features "['scale-monitor-framebuffer']"
+
 relay_mutter_args=(--wayland --no-x11 --wayland-display="$WAYLAND_DISPLAY")
 if mutter --help | rg -q -- '--nested'; then relay_mutter_args+=(--nested); fi
 DISPLAY="$relay_outer_display" GDK_BACKEND=x11 mutter "${relay_mutter_args[@]}" \
@@ -69,26 +85,65 @@ done
 test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
 unset DISPLAY
 
-dbus-update-activation-environment XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME \
-  XDG_SESSION_TYPE XDG_CURRENT_DESKTOP WAYLAND_DISPLAY GDK_BACKEND GTK_A11Y \
-  NO_AT_BRIDGE LIBGL_ALWAYS_SOFTWARE GSK_RENDERER LANG LC_ALL
 gsettings set org.gnome.desktop.interface toolkit-accessibility true
 gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
   --method org.a11y.Bus.GetAddress > "$RELAY_NATIVE_EVIDENCE_DIR/a11y-address.txt"
 
 pipewire > "$RELAY_NATIVE_EVIDENCE_DIR/pipewire.log" 2>&1 &
 relay_owned_pids+=("$!")
-wireplumber > "$RELAY_NATIVE_EVIDENCE_DIR/wireplumber.log" 2>&1 &
-relay_owned_pids+=("$!")
 for relay_attempt in {1..50}; do
   if test -S "$XDG_RUNTIME_DIR/pipewire-0"; then break; fi
   sleep 0.1
 done
 test -S "$XDG_RUNTIME_DIR/pipewire-0"
+timeout 5 pw-cli info 0 > "$RELAY_NATIVE_EVIDENCE_DIR/pipewire-core.log"
+
+# The container has no physical Bluetooth seat or systemd-logind. WirePlumber
+# 0.4 otherwise treats its optional Bluetooth logind module's activation error
+# as fatal. Disable only that unused hardware monitor, keeping real portal
+# permissions, PipeWire nodes and normal linking policy intact.
+if wireplumber --version | rg -q '0\.4\.'; then
+  mkdir -p "$XDG_CONFIG_HOME/wireplumber/bluetooth.lua.d"
+  cat > "$XDG_CONFIG_HOME/wireplumber/bluetooth.lua.d/80-relay-native.lua" <<'WIREPLUMBER'
+bluez_monitor.enabled = false
+WIREPLUMBER
+else
+  mkdir -p "$XDG_CONFIG_HOME/wireplumber/wireplumber.conf.d"
+  cat > "$XDG_CONFIG_HOME/wireplumber/wireplumber.conf.d/80-relay-native.conf" <<'WIREPLUMBER'
+wireplumber.profiles = {
+  main = {
+    monitor.bluez = disabled
+    monitor.bluez-midi = disabled
+    monitor.bluez.seat-monitoring = disabled
+    support.logind = disabled
+  }
+}
+WIREPLUMBER
+fi
+wireplumber > "$RELAY_NATIVE_EVIDENCE_DIR/wireplumber.log" 2>&1 &
+relay_wireplumber_pid="$!"
+relay_owned_pids+=("$relay_wireplumber_pid")
+relay_wireplumber_ready=false
+for relay_attempt in {1..50}; do
+  kill -0 "$relay_wireplumber_pid"
+  if timeout 2 pw-cli ls Metadata | rg -q 'metadata.name = "default"'; then
+    relay_wireplumber_ready=true
+    break
+  fi
+  sleep 0.1
+done
+"$relay_wireplumber_ready"
+kill -0 "$relay_wireplumber_pid"
 
 /usr/libexec/xdg-desktop-portal-gnome \
   > "$RELAY_NATIVE_EVIDENCE_DIR/portal-gnome.log" 2>&1 &
 relay_owned_pids+=("$!")
+for relay_attempt in {1..50}; do
+  if gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+    --method org.freedesktop.DBus.GetNameOwner org.freedesktop.impl.portal.desktop.gnome \
+    >/dev/null 2>&1; then break; fi
+  sleep 0.1
+done
 /usr/libexec/xdg-desktop-portal --verbose \
   > "$RELAY_NATIVE_EVIDENCE_DIR/portal.log" 2>&1 &
 export RELAY_TEST_PORTAL_PID="$!"
