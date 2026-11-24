@@ -1,0 +1,45 @@
+name: Wayland recovery capability probe
+
+on:
+  push:
+    branches: [feat/wayland-workspace-return-20261125]
+    paths:
+      - .github/workflows/wayland-workspace-return-probe.yml
+      - packages/device/test/manual/wayland-workspace-return-probe.py
+      - packages/device/test/manual/wayland-workspace-return-probe.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-prerequisites:
+    name: Measure native GNOME recovery prerequisites
+    runs-on: ubuntu-latest
+    container: node:22-bookworm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install the same native compositor and GTK runtime as portal acceptance
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            dbus dbus-daemon mutter python3-gi gir1.2-gtk-3.0 \
+            libgl1-mesa-dri libegl-mesa0 libgbm1 fonts-dejavu-core
+      - name: Observe actual mapping, focus and frame feedback
+        run: |
+          for relay_probe_mode in viewer no-accept; do
+            export RELAY_MAP_PROBE_MODE="$relay_probe_mode"
+            export RELAY_MAP_PROBE_DIR="/tmp/relay-wayland-return-native/$relay_probe_mode"
+            dbus-run-session -- bash packages/device/test/manual/wayland-workspace-return-probe.sh
+          done
+      - name: Retain measurements without declaring workspace acceptance
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: wayland-workspace-return-prerequisites
+          path: /tmp/relay-wayland-return-native/
+          if-no-files-found: error
+          retention-days: 14
