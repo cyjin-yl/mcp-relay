@@ -52,19 +52,30 @@ jobs:
   portal:
     name: Native ${{ matrix.transport }}, ${{ matrix.distribution }}, scale ${{ matrix.scale }}
     runs-on: ubuntu-latest
-    container: node:22-${{ matrix.distribution }}
+    container: ${{ matrix.image }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
           - distribution: bookworm
+            image: node:22-bookworm
             transport: gnome-legacy
             scale: 1
           - distribution: trixie
+            image: node:22-trixie
             transport: eis
             scale: 1
           - distribution: trixie
+            image: node:22-trixie
+            transport: eis
+            scale: 2
+          - distribution: forky
+            image: debian:forky-slim
+            transport: eis
+            scale: 1
+          - distribution: forky
+            image: debian:forky-slim
             transport: eis
             scale: 2
     env:
@@ -72,6 +83,11 @@ jobs:
       RELAY_TEST_INPUT_TRANSPORT: ${{ matrix.transport }}
       RELAY_NATIVE_EVIDENCE_DIR: /tmp/relay-wayland-native
     steps:
+      - name: Install modern distribution build runtime before checkout
+        if: matrix.distribution == 'forky'
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs npm git ca-certificates
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false

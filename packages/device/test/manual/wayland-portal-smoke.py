@@ -65,6 +65,9 @@ def fixture():
         "scrollY": 0.0,
         "buttons": [],
         "keys": [],
+        "keyPresses": 0,
+        "capsLock": None,
+        "lastKeyCapsLock": None,
         "logicalWidth": 0,
         "logicalHeight": 0,
         "gdkScale": 1,
@@ -76,6 +79,8 @@ def fixture():
         state["logicalWidth"] = window.get_width()
         state["logicalHeight"] = window.get_height()
         state["gdkScale"] = window.get_scale_factor()
+        keyboard = display.get_default_seat().get_keyboard()
+        state["capsLock"] = keyboard.get_caps_lock_state() if keyboard is not None else None
         serialized = json.dumps(state, sort_keys=True, ensure_ascii=False)
         if serialized != last:
             print(serialized, flush=True)
@@ -148,6 +153,8 @@ def fixture():
 
     def key_pressed(_controller, keyval, _keycode, _modifiers):
         name = Gdk.keyval_name(keyval) or str(keyval)
+        state["keyPresses"] += 1
+        state["lastKeyCapsLock"] = bool(_modifiers & Gdk.ModifierType.LOCK_MASK)
         state["keys"] = sorted(set(state["keys"]) | {name})
         report()
         return False
@@ -173,6 +180,12 @@ def fixture():
         request = json.loads(line)
         if request.get("operation") == "present":
             window.present()
+        elif request.get("operation") == "snapshot":
+            nonce = request.get("nonce")
+            if not isinstance(nonce, str) or not 1 <= len(nonce) <= 128:
+                raise RuntimeError("Snapshot command requires a bounded nonce")
+            state["snapshotNonce"] = nonce
+            report()
         elif request.get("operation") == "quit":
             loop.quit()
             return False

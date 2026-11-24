@@ -89,7 +89,7 @@ async function main(): Promise<void> {
     child.stderr.on("data", bytes => { stderr = (stderr + String(bytes)).slice(-16000); });
     const timer = setTimeout(() => child.kill("SIGKILL"), 25000);
     const code = await new Promise<number | null>((done, reject) => {
-      child.once("error", reject); child.once("exit", done); child.stdin.end(input);
+      child.once("error", reject); child.once("close", done); child.stdin.end(input);
     }).finally(() => clearTimeout(timer));
     return { code, stdout, stderr };
   }
@@ -206,6 +206,7 @@ async function main(): Promise<void> {
     }
 
     success(await call("computer_handoff", { mode: "pause" }));
+    await until(() => helpers().length === 0, "Handoff closes the actual helper before another RPC", 5000);
     const paused = await info(); assert.equal(paused.paused, true); assert.equal(paused.available, false);
     assert.equal((await call("computer_screenshot")).isError, true);
     success(await call("computer_handoff", { mode: "resume" }));
@@ -224,11 +225,18 @@ async function main(): Promise<void> {
     passed("local CLI pause revokes an idle worker grant before another remote call");
 
     const registrations = hellos.length;
+    const applicationBeforeDisconnect = { clicks: observed.clicks, text: observed.text };
     socket!.close(1000, "owned native test disconnect");
     await until(() => hellos.length > registrations, "Owned worker reconnect", 15000);
+    await until(() => helpers().length === 0, "Disconnect closes the actual helper before another RPC", 5000);
     assert.equal((await info()).available, false);
     assert.equal((await python("absent")).dialogAbsent, true);
-    assert.equal(observed.clicks, 1, "The user application survives connection loss");
+    const nonce = randomUUID();
+    fixture.stdin.write(JSON.stringify({ operation: "snapshot", nonce }) + "\n");
+    await until(() => observed.snapshotNonce === nonce, "Fresh native application response after connection loss");
+    assert.equal(fixture.exitCode, null); assert.equal(fixture.signalCode, null);
+    assert.deepEqual({ clicks: observed.clicks, text: observed.text }, applicationBeforeDisconnect,
+      "The live application retains its actual state after connection loss");
     passed("WebSocket reconnect cannot reuse the old grant and preserves the native application");
     report.passed = true;
   } catch (error) {

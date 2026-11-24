@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
@@ -13,6 +13,7 @@ type Observation = {
   displayType: string; text: string; clicks: number; drags: number; motion: number;
   scrollX: number; scrollY: number; buttons: number[]; keys: string[];
   pointerEntries: number; lastPointerEvent: "enter" | "motion";
+  capsLock: boolean | null; lastKeyCapsLock: boolean | null; keyPresses: number;
   logicalWidth: number; logicalHeight: number; gdkScale: number;
   lastPointer: [number, number];
 };
@@ -37,6 +38,7 @@ async function main(): Promise<void> {
   const backend = createWaylandBackend(fixtureEnv);
   const checks: string[] = [];
   const layouts: Record<string, any>[] = [];
+  const probes: Record<string, any> = {};
   const fixtureScales = new WeakMap<ComputerDisplay, number>();
   const expectedScale = Number(process.env.RELAY_TEST_SCALE ?? "1");
   const expectedTransport = process.env.RELAY_TEST_INPUT_TRANSPORT;
@@ -151,11 +153,14 @@ async function main(): Promise<void> {
 
   try {
     fixture = spawn("/usr/bin/python3", ["-u", fixtureScript, "fixture"], {
-      env: fixtureEnv, stdio: ["pipe", "pipe", "pipe"], shell: false
+      env: { ...fixtureEnv, WAYLAND_DEBUG: "client" }, stdio: ["pipe", "pipe", "pipe"], shell: false
     });
     const lines = createInterface({ input: fixture.stdout });
     lines.on("line", line => { observed = JSON.parse(line); });
-    fixture.stderr.on("data", bytes => { diagnostic = (diagnostic + String(bytes)).slice(-16000); });
+    fixture.stderr.on("data", bytes => {
+      diagnostic = (diagnostic + String(bytes)).slice(-16000);
+      appendFileSync(join(evidence, "fixture-wayland.log"), bytes, { mode: 0o600 });
+    });
     fixture.once("exit", (code, signal) => { diagnostic += ` fixture-exit=${code}/${signal}`; });
     await until(() => Boolean(observed.displayType) && Number(observed.logicalWidth) >= 640, "Native GTK fixture readiness");
     assert.match(observed.displayType!, /Wayland/);
@@ -264,6 +269,7 @@ async function main(): Promise<void> {
     await assert.rejects(() => backend.act({ type: "move", ...pixel(screen, 300, 250) }, screen, context()));
     drags = observed.drags;
     await act({ type: "move", ...pixel(current.display, 550, 390) }, current.display);
+    await screenshot("after-helper-crash-move");
     await until(() => Boolean(observed.lastPointer) && Math.abs(observed.lastPointer![0] - 550) <= 2 &&
       Math.abs(observed.lastPointer![1] - 390) <= 2, "Native GTK verifies a pointer target beyond half the physical image at scale2");
     const motionBeforeReleaseCheck = Number(observed.motion);
@@ -327,6 +333,40 @@ async function main(): Promise<void> {
       ? "EIS reauthorization maps real input correctly at the newly applied compositor scale"
       : "explicit reauthorization at supported legacy scale1 restores actual native input");
 
+    if (expectedTransport === "eis") {
+      await act({ type: "click", ...pixel(current.display, 100, 40) }, current.display);
+      await act({ type: "key", keys: ["Control_L", "a"] }, current.display);
+      await act({ type: "key", keys: ["Backspace"] }, current.display);
+      await until(() => observed.text === "", "CapsLock probe starts with an empty owned entry");
+      assert.equal(observed.capsLock, false, "The owned native fixture starts with CapsLock off");
+      await act({ type: "key", keys: ["CapsLock"] }, current.display);
+      await until(() => observed.capsLock === true && observed.keys?.length === 0,
+        "Native Wayland keyboard confirms CapsLock was enabled and its key released");
+      probes.initialCapsLock = { beforeNewGrant: { capsLock: observed.capsLock, text: observed.text } };
+      await backend.close?.();
+      await authorize();
+      current = await screenshot("caps-lock-new-grant");
+      try {
+        await act({ type: "click", ...pixel(current.display, 100, 40) }, current.display);
+        const keyPresses = Number(observed.keyPresses);
+        await act({ type: "key", keys: ["Shift_L"] }, current.display);
+        await until(() => Number(observed.keyPresses) > keyPresses && observed.keys?.length === 0,
+          "New grant delivers a harmless modifier event to inspect actual locked state");
+        probes.initialCapsLock.afterNewGrant = { capsLock: observed.capsLock, keyEventLock: observed.lastKeyCapsLock, text: observed.text };
+        assert.equal(observed.capsLock, true, "The initial locked state must actually survive across the fresh grant");
+        assert.equal(observed.lastKeyCapsLock, true, "An actual GTK key event independently confirms the initial lock mask");
+        await act({ type: "text", text: "Aa!" }, current.display);
+        await delay(150);
+        probes.initialCapsLock.actualText = observed.text;
+        assert.equal(observed.text, "Aa!", "Fresh EIS input must respect an already active compositor CapsLock state");
+        passed("new EIS grant respects an independently observed pre-existing CapsLock state");
+      } finally {
+        if (Boolean(observed.capsLock)) {
+          await backend.act({ type: "key", keys: ["CapsLock"] }, current.display, context()).catch(() => undefined);
+        }
+      }
+    }
+
     const portalPid = Number(process.env.RELAY_TEST_PORTAL_PID);
     assert.ok(Number.isSafeInteger(portalPid) && portalPid > 1, "Only the explicitly spawned test portal may be stopped");
     process.kill(portalPid, "SIGTERM");
@@ -336,7 +376,7 @@ async function main(): Promise<void> {
     assert.equal((await python("absent")).dialogAbsent, true, "Owner loss must not silently request another grant");
     passed("real portal owner loss revokes input without silent reauthorization");
 
-    const receipt = { ok: true, backend: backend.id, checks, observed, display: screen, layouts,
+    const receipt = { ok: true, backend: backend.id, checks, observed, display: screen, layouts, probes,
       inputTransport: expectedTransport,
       sourceRevision: process.env.GITHUB_SHA ?? null,
       harnessSha256: createHash("sha256").update(readFileSync(process.argv[1]!)).digest("hex"),
@@ -345,7 +385,7 @@ async function main(): Promise<void> {
     writeFileSync(join(evidence, "receipt.json"), JSON.stringify(receipt, null, 2) + "\n", { mode: 0o600 });
     process.stdout.write(JSON.stringify(receipt, null, 2) + "\n");
   } catch (error) {
-    const failure = { ok: false, checks, observed, diagnostic,
+    const failure = { ok: false, checks, observed, diagnostic, probes,
       error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack,
         code: "code" in error ? error.code : undefined,
         details: "details" in error ? error.details : undefined } : String(error) };

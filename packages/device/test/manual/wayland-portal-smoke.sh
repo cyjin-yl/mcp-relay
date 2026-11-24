@@ -35,6 +35,10 @@ if [ "${RELAY_TEST_INPUT_TRANSPORT:-}" = eis ]; then
   # Upstream EIS topology traces distinguish a real keymap/device replacement
   # from a monitor-region change when the production input fence fires.
   export MUTTER_DEBUG=eis
+else
+  # Diagnose the actual compositor queue and device cleanup on the legacy
+  # native backend. These upstream topics contain only this owned fixture.
+  export MUTTER_DEBUG=remote-desktop,input
 fi
 relay_owned_pids=()
 relay_cleanup() {
