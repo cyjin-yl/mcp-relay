@@ -125,6 +125,32 @@ jobs:
             > "$RELAY_NATIVE_EVIDENCE_DIR/session.log" 2>&1 || relay_native_exit=$?
           cat "$RELAY_NATIVE_EVIDENCE_DIR/session.log"
           exit "$relay_native_exit"
+      - name: Freeze the accepted CLI for other native platforms
+        if: matrix.distribution == 'forky' && matrix.scale == 1
+        env:
+          RELAY_CANDIDATE_DIR: ${{ runner.temp }}/relay-wayland-candidate
+        run: |
+          mkdir -p "$RELAY_CANDIDATE_DIR"
+          cp packages/device/dist/cli.cjs "$RELAY_CANDIDATE_DIR/cli.cjs"
+          node --input-type=module <<'NODE'
+          import { build } from 'esbuild';
+          import { join } from 'node:path';
+          await build({
+            entryPoints: ['packages/device/test/manual/computer-native-smoke.ts'],
+            bundle: true, platform: 'node', target: 'node22', format: 'cjs',
+            outfile: join(process.env.RELAY_CANDIDATE_DIR, 'computer-native-smoke.cjs'),
+          });
+          NODE
+          npm pack --workspace @cyjin/mcp-relay --ignore-scripts --pack-destination "$RELAY_CANDIDATE_DIR"
+          cd "$RELAY_CANDIDATE_DIR"
+          sha256sum cli.cjs computer-native-smoke.cjs cyjin-mcp-relay-*.tgz > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: matrix.distribution == 'forky' && matrix.scale == 1
+        with:
+          name: wayland-release-candidate
+          path: ${{ runner.temp }}/relay-wayland-candidate/
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

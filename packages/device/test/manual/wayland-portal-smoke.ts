@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -15,6 +15,7 @@ type Observation = {
   pointerEntries: number; lastPointerEvent: "enter" | "motion";
   capsLock: boolean | null; lastKeyCapsLock: boolean | null; keyPresses: number;
   devicePointer: [number, number] | null;
+  snapshotNonce: string;
   logicalWidth: number; logicalHeight: number; gdkScale: number;
   lastPointer: [number, number];
 };
@@ -77,7 +78,15 @@ async function main(): Promise<void> {
     assert.equal(exit, 0, "Native fixture " + mode + ": " + output + "\n" + stderr);
     return JSON.parse(output.trim());
   }
-  async function authorize(requireInput = true): Promise<ComputerState> {
+  async function inputCounters(): Promise<Record<string, number>> {
+    const nonce = randomUUID();
+    fixture!.stdin.write(JSON.stringify({ operation: "snapshot", nonce }) + "\n");
+    await until(() => observed.snapshotNonce === nonce, "Fresh native fixture acknowledgement");
+    return Object.fromEntries((["clicks", "drags", "motion", "scrollX", "scrollY", "keyPresses"] as const)
+      .map(key => [key, Number(observed[key])]));
+  }
+  async function authorize(requireInput = true, noInputLabel?: string): Promise<ComputerState> {
+    const beforeInput = noInputLabel ? await inputCounters() : undefined;
     const pending = outcome(backend.setup!(context(30000)));
     const clicked = await python("allow");
     assert.equal(clicked.dialogAction, "Share");
@@ -102,6 +111,11 @@ async function main(): Promise<void> {
     assert.ok(state.displays.length > 0);
     fixture!.stdin.write(JSON.stringify({ operation: "present" }) + "\n");
     await delay(300);
+    if (beforeInput) {
+      assert.deepEqual(await inputCounters(), beforeInput,
+        "Portal setup must not move, click, scroll or type in the native application");
+      passed(noInputLabel + " initializes devices without application input events");
+    }
     return state;
   }
   function pixel(display: ComputerDisplay, x: number, y: number) {
@@ -188,7 +202,7 @@ async function main(): Promise<void> {
     assert.equal((await python("absent")).dialogAbsent, true);
     passed("consent deadline closes the real dialog and does not leave a grant");
 
-    const state = await authorize();
+    const state = await authorize(true, "initial consent");
     const first = await screenshot("before-input");
     await assertColors(first.data, first.display, false);
     passed("real portal consent returns PipeWire PNG containing the native fixture");
@@ -330,7 +344,7 @@ async function main(): Promise<void> {
       layouts.push(await python("scale", ["1"]));
       await until(() => observed.gdkScale === 1 && observed.logicalWidth === 1600, "Legacy test returns to scale1");
     }
-    await authorize();
+    await authorize(true, "post-layout consent");
     current = await screenshot("reauthorized-layout");
     assert.notEqual(current.display.instanceId, stale.display.instanceId, "Explicit consent creates a new monitor instance after layout changes");
     await act({ type: "click", ...pixel(current.display, 100, 100) }, current.display);

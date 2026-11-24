@@ -203,5 +203,100 @@ class HelperProtocolTests(unittest.TestCase):
             child.stderr.close()
 
 
+class HelperSetupTests(unittest.TestCase):
+    def setUp(self):
+        self.portal, self.events = Portal(), []
+        self.portal.bus = FakeBus()
+        self.portal.bus.get_unique_name = lambda: ":1.7"
+        self.portal.bus.signal_subscribe = lambda *_: 1
+        self.portal.bus.signal_unsubscribe = lambda *_: None
+        self.portal.probe = lambda *_: None
+        self.portal.remote_properties = {"version": 1}
+        self.devices, self.safe_layout = 2, True
+
+        def request(_interface, method, *_args):
+            if method == "CreateSession":
+                return {"session_handle": self.portal.session}
+            if method == "Start":
+                return {"devices": self.devices, "streams": [(24, {
+                    "size": (800, 600), "position": (0, 0), "mapping_id": "monitor-one"})]}
+            return {}
+
+        def layout(_portal, _ctx):
+            guard = types.SimpleNamespace(available=False, reason="Fixture layout", close=lambda: None)
+            def bind(ctx):
+                ctx.check()
+                self.events.append("guard")
+                guard.available = self.safe_layout
+            def check(ctx):
+                ctx.check()
+                if not guard.available:
+                    raise Failure("input_unavailable", "Unsafe fixture layout")
+            guard.bind, guard.check = bind, check
+            return guard
+
+        self.portal.request = request
+        self.portal.capture = lambda *_: self.events.append("capture")
+        self.portal.notify = lambda method, _signature, arguments, _ctx: self.events.append((method, arguments))
+        self.globals = patch.dict(MODULE, {
+            "LegacyLayout": layout,
+            "Gio": types.SimpleNamespace(DBusCallFlags=types.SimpleNamespace(NONE=0),
+                                         DBusSignalFlags=types.SimpleNamespace(NONE=0)),
+            "GLib": types.SimpleNamespace(Variant=lambda signature, values: (signature, values),
+                                          VariantType=types.SimpleNamespace(new=lambda value: value)),
+        })
+        self.globals.start()
+        self.addCleanup(self.globals.stop)
+
+    def test_legacy_initialization_occurs_after_guard_and_before_final_capture(self):
+        result = self.portal.setup(Context(2000))
+        self.assertTrue(result["state"]["available"])
+        self.assertEqual(self.events, ["capture", "guard", ("NotifyPointerAxis", (0.0, 0.0)), "capture"])
+        self.assertEqual(self.portal.held_buttons, [])
+
+    def test_capture_only_sessions_never_initialize_a_pointer(self):
+        for devices, safe_layout in ((0, True), (2, False)):
+            self.devices, self.safe_layout = devices, safe_layout
+            self.events.clear()
+            self.portal.close()
+            result = self.portal.setup(Context(2000))
+            self.assertTrue(result["state"]["available"])
+            self.assertEqual(result["state"]["actions"], [])
+            self.assertEqual(self.events, ["capture", "guard"])
+
+    def test_cancel_or_failure_during_initialization_closes_the_grant(self):
+        for code, during_capture in (("cancelled", False), ("portal_unavailable", False), ("capture_failed", True)):
+            self.events.clear()
+            self.portal.close()
+            def notify(*_args):
+                self.events.append("initialize")
+                if not during_capture:
+                    raise Failure(code, "Injected setup interruption")
+            def capture(*_args):
+                if self.events and self.events[-1] == "initialize":
+                    raise Failure(code, "Injected setup capture failure")
+                self.events.append("capture")
+            self.portal.notify, self.portal.capture = notify, capture
+            with self.assertRaises(Failure) as caught:
+                self.portal.setup(Context(2000))
+            self.assertEqual(caught.exception.code, code)
+            self.assertFalse(self.portal.active)
+            self.assertIsNone(self.portal.session)
+            self.assertEqual(self.portal.held_buttons, [])
+            self.assertTrue(any(call[2:4] == (MODULE["SESSION"], "Close") for call in self.portal.bus.calls))
+
+    def test_eis_never_sends_a_legacy_initializer(self):
+        self.portal.remote_properties = {"version": 2}
+        self.portal.bus.call_with_unix_fd_list_sync = lambda *_: (
+            types.SimpleNamespace(unpack=lambda: (0,)),
+            types.SimpleNamespace(get_length=lambda: 1, get=lambda _index: 9))
+        eis = types.SimpleNamespace(generation=1, connect=lambda *_: True, display=lambda *_: None,
+            pump=lambda: None, ready=lambda *_: True, actions=lambda *_: ["move"])
+        with patch.dict(MODULE, {"EisInput": lambda: eis}):
+            result = self.portal.setup(Context(2000))
+        self.assertEqual(result["state"]["details"]["inputTransport"], "eis")
+        self.assertEqual(self.events, ["capture"])
+
+
 if __name__ == "__main__":
     unittest.main()

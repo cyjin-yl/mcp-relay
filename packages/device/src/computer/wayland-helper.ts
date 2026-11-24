@@ -615,6 +615,16 @@ class Portal:
             else:
                 self.layout.bind(ctx)
                 self.input_reason = self.layout.reason
+                if self.layout.available and self.granted_devices & 2:
+                    # GNOME's legacy virtual pointer is created lazily. A zero
+                    # continuous axis, without finish, creates it without moving,
+                    # clicking or scrolling; zero discrete steps are invalid.
+                    self.notify("NotifyPointerAxis", "(oa{sv}dd)", (0.0, 0.0), ctx)
+                    # Do compositor work after publishing the new seat capability
+                    # and before returning setup. A Notify acknowledgement is not
+                    # confirmation that every Wayland client consumed the change.
+                    for stream in self.streams:
+                        self.capture(stream, ctx)
             self.require_session(ctx)
             self.permission = "granted"
             return {"state": self.state(ctx, probe=False), "automaticInstall": False}
