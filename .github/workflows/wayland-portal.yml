@@ -93,8 +93,8 @@ jobs:
           dpkg-query -W mutter xdg-desktop-portal xdg-desktop-portal-gnome pipewire \
             gstreamer1.0-pipewire python3-gi libgtk-4-1
       - run: npm ci --no-audit --no-fund
-      - name: Build the production TypeScript backend into the native harness
-        run: node scripts/build-wayland-portal-tests.mjs
+      - name: Build the production CLI and native acceptance harnesses
+        run: npm run build && node scripts/build-device.mjs && node scripts/build-wayland-portal-tests.mjs
       - name: Exercise real consent, capture, input and session loss
         run: |
           mkdir -p "$RELAY_NATIVE_EVIDENCE_DIR"

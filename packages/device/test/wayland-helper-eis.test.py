@@ -119,6 +119,29 @@ class XkbPlanningTests(unittest.TestCase):
         self.assertEqual(keyboard.mask()[0], 0)
         self.render_plan(keyboard, "Aa!")
 
+    def test_pause_then_resume_cannot_continue_a_shifted_character(self):
+        keyboard = self.keyboard()
+        instance = EisContracts.bare(self)
+        record = EisContracts.record(self, 10, caps=(4,))
+        record["keyboard"] = keyboard
+        instance.devices = {10: record}
+        shift = keyboard.plan([MODULE["keysym"]("shift")])[0][0][1]
+        keyboard.own_key(shift, True)
+        instance.held = [("key", 10, shift)]
+        events = iter((7, 8, None))
+        instance.api = types.SimpleNamespace(ei=types.SimpleNamespace(
+            ei_dispatch=lambda _: None, ei_get_event=lambda _: next(events, None),
+            ei_event_get_type=lambda event: event, ei_event_get_device=lambda _: 10,
+            ei_event_unref=lambda _: None, ei_device_start_emulating=lambda *_: None,
+            ei_device_keyboard_key=lambda *_: self.fail("A neutralized Shift must not be followed by the character")))
+        instance.pump = lambda wait=0: EisInput.pump(instance, wait)
+        with self.assertRaises(Failure) as caught:
+            instance.key(record, 30, True, Context(2000), 5)
+        self.assertEqual(caught.exception.code, "input_interrupted")
+        self.assertTrue(record["active"])
+        self.assertEqual(keyboard.mask()[0], 0)
+        self.assertEqual(instance.held, [])
+
     def test_replacement_map_replans_remaining_text_without_replaying_characters(self):
         old_map, new_map = self.keyboard("us"), self.keyboard("de")
         instance = EisContracts.bare(self)
@@ -169,6 +192,7 @@ class EisContracts(unittest.TestCase):
         instance = EisInput.__new__(EisInput)
         instance.context, instance.connected, instance.generation = 1, True, 5
         instance.devices, instance.held, instance.device_changes = {}, [], []
+        instance.input_interrupted, instance.sequence = False, 0
         instance.session_check = None
         instance.expected_ping, instance.pong_received = None, False
         instance.pump = lambda *_: None
@@ -186,6 +210,40 @@ class EisContracts(unittest.TestCase):
         self.assertIs(instance.device(16, 1, first), first)
         instance.devices = {3: physical}
         self.assertIsNone(instance.device(32, 1))
+
+    def test_missing_keyboard_map_does_not_hide_working_pointer_actions(self):
+        instance = self.bare()
+        selected = self.record(9)
+        keyboard = self.record(10, caps=(4,))
+        instance.devices = {9: selected, 10: keyboard}
+        instance.region = lambda mapping: (selected, (0, 0, 800, 600))
+        streams = [{"mapping": "selected"}]
+        self.assertTrue(instance.ready(streams))
+        self.assertEqual(instance.actions(streams), ["move", "click", "drag", "scroll"])
+
+    def test_connected_unmapped_eis_stops_waiting_after_ten_seconds(self):
+        instance = self.bare()
+        instance.api = types.SimpleNamespace(ei=types.SimpleNamespace(
+            ei_new_sender=lambda _: 1, ei_configure_name=lambda *_: None,
+            ei_setup_backend_fd=lambda *_: 0))
+        instance.ready = lambda _: False
+        context = types.SimpleNamespace(check=lambda: None)
+        with patch.object(MODULE["os"], "set_blocking"), patch.object(MODULE["time"], "monotonic", side_effect=(0, 9.99, 10)):
+            self.assertFalse(instance.connect(33, [{"mapping": "missing"}], context))
+        self.assertTrue(instance.connected)
+
+    def test_missing_xkb_library_is_an_optional_keyboard_dependency(self):
+        descriptor = KeymapDescriptor()
+        def library(name):
+            if name == "libei.so.1":
+                return descriptor
+            raise OSError("fixture library unavailable")
+        with patch.object(ctypes, "CDLL", side_effect=library):
+            api = MODULE["EisApi"]()
+        self.assertIsNone(api.xkb)
+        with self.assertRaises(Failure) as caught:
+            XkbKeyboard(api, 1)
+        self.assertEqual(caught.exception.code, "eis_keymap_unsupported")
 
     def test_keyboard_replacement_does_not_relabel_the_captured_monitor(self):
         instance = self.bare()

@@ -7,7 +7,10 @@ import select
 class EisApi:
     def __init__(self):
         self.ei = ctypes.CDLL("libei.so.1")
-        self.xkb = ctypes.CDLL("libxkbcommon.so.0")
+        try:
+            self.xkb = ctypes.CDLL("libxkbcommon.so.0")
+        except OSError:
+            self.xkb = None
         p, u, i, b, d, z = ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_bool, ctypes.c_double, ctypes.c_size_t
         functions = {
             "ei_new_sender": (p, [p]), "ei_unref": (p, [p]), "ei_configure_name": (None, [p, ctypes.c_char_p]),
@@ -44,14 +47,20 @@ class EisApi:
             "xkb_state_serialize_mods": (u, [p, u]), "xkb_state_serialize_layout": (u, [p, u]),
             "xkb_state_key_get_one_sym": (u, [p, u]),
         }
-        for name, (result, arguments) in xkb_functions.items():
-            function = getattr(self.xkb, name)
-            function.restype, function.argtypes = result, arguments
+        if self.xkb is not None:
+            try:
+                for name, (result, arguments) in xkb_functions.items():
+                    function = getattr(self.xkb, name)
+                    function.restype, function.argtypes = result, arguments
+            except AttributeError:
+                self.xkb = None
 
 
 class XkbKeyboard:
     def __init__(self, api, keymap):
         self.api, self.context, self.keymap, self.state = api, None, None, None
+        if api.xkb is None:
+            raise Failure("eis_keymap_unsupported", "Install libxkbcommon for keyboard input. EIS pointer input remains available.")
         try:
             size = int(api.ei.ei_keymap_get_size(keymap))
             fd = api.ei.ei_keymap_get_fd(keymap)
@@ -166,12 +175,14 @@ class EisInput:
         self.device_changes = []
         self.sequence = 0
         self.held = []
+        self.input_interrupted = False
         self.expected_ping = None
         self.pong_received = False
         self.session_check = None
 
     def connect(self, fd, streams, ctx):
         transferred = False
+        ready_deadline = time.monotonic() + 10
         try:
             os.set_blocking(fd, False)
             self.context = self.api.ei.ei_new_sender(None)
@@ -184,11 +195,16 @@ class EisInput:
                 raise Failure("eis_unavailable", "The desktop EIS connection could not start.")
             while True:
                 self.check_session(ctx)
+                if time.monotonic() >= ready_deadline:
+                    if self.connected:
+                        return False
+                    raise Failure("eis_unavailable", "The desktop EIS connection did not become ready within ten seconds.")
                 self.pump(0.025)
                 if self.connected and self.ready(streams):
-                    self.sync(ctx)
+                    sync_ms = min(ctx.remaining(10000), max(1, math.ceil((ready_deadline - time.monotonic()) * 1000)))
+                    self.sync(Context(sync_ms))
                     if self.ready(streams):
-                        return
+                        return True
         finally:
             if not transferred:
                 os.close(fd)
@@ -247,7 +263,12 @@ class EisInput:
                         if record["virtual"] and 4 in record["caps"]:
                             keymap = api.ei_device_keyboard_get_keymap(device)
                             if keymap:
-                                record["keyboard"] = XkbKeyboard(self.api, keymap)
+                                try:
+                                    record["keyboard"] = XkbKeyboard(self.api, keymap)
+                                except Failure as error:
+                                    if error.code != "eis_keymap_unsupported":
+                                        raise
+                                    record["keyboardReason"] = error.message
                         self.changed(kind, record)
                     elif kind == 9:
                         record = self.devices.get(pointer)
@@ -264,6 +285,8 @@ class EisInput:
                             # EI pause/removal neutralizes the server device.
                             # Never send an up event through a dead device pointer.
                             record["active"] = False
+                            if any(held[1] == pointer for held in self.held):
+                                self.input_interrupted = True
                             self.held = [held for held in self.held if held[1] != pointer]
                             if kind == 7 and record["keyboard"]:
                                 record["keyboard"].neutralize()
@@ -354,11 +377,23 @@ class EisInput:
     def ready(self, streams):
         if not self.connected:
             return False
-        for stream in streams:
-            mapped = self.region(stream["mapping"])
-            if mapped is None or any(self.device(capability, mapped[0]["seat"], mapped[0]) is None for capability in (4, 16, 32)):
-                return False
-        return True
+        return bool(streams) and all(self.region(stream["mapping"]) is not None for stream in streams)
+
+    def actions(self, streams):
+        if not self.ready(streams):
+            return []
+        routes = [self.region(stream["mapping"])[0] for stream in streams]
+        result = ["move"]
+        for capability, names in ((32, ("click", "drag")), (16, ("scroll",)), (4, ("key", "text"))):
+            try:
+                supported = all(self.device(capability, route["seat"], route) is not None for route in routes)
+            except Failure as error:
+                if error.code != "eis_device_ambiguous":
+                    raise
+                supported = False
+            if supported:
+                result.extend(names)
+        return result
 
     def display(self, stream):
         mapped = self.region(stream["mapping"])
@@ -378,6 +413,8 @@ class EisInput:
             raise Failure("display_changed", "The compositor input devices or monitor regions changed. Capture a new frame.", {
                 "phase": phase, "expectedGeneration": generation, "currentGeneration": self.generation,
                 "deviceChanges": [change for change in self.device_changes if change["generation"] > generation]})
+        if self.input_interrupted:
+            raise Failure("input_interrupted", "The compositor paused an input device while a key or button was held; the transaction was stopped.", {"mayHaveApplied": True})
 
     def key(self, record, code, pressed, ctx, generation):
         self.check(ctx, generation, "keyboard-event")
@@ -413,6 +450,7 @@ class EisInput:
                 self.frame(pointer)
             self.held.clear()
             self.api.ei.ei_dispatch(self.context)
+            self.input_interrupted = False
             return True
         except Exception:
             return False

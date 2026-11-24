@@ -60,6 +60,7 @@ def fixture():
         "clicks": 0,
         "drags": 0,
         "motion": 0,
+        "pointerEntries": 0,
         "scrollX": 0.0,
         "scrollY": 0.0,
         "buttons": [],
@@ -116,17 +117,21 @@ def fixture():
     canvas.add_controller(click)
     motion = Gtk.EventControllerMotion()
 
-    def moved(controller, x, y):
-        state["motion"] += 1
+    def pointer_position(controller, x, y, event_type):
+        state["motion" if event_type == "motion" else "pointerEntries"] += 1
         modifiers = controller.get_current_event_state()
         # Actual event state, rather than our own press bookkeeping, detects a
         # stuck compositor button after a helper crash.
         if modifiers & Gdk.ModifierType.BUTTON1_MASK:
             state["drags"] += 1
         state["lastPointer"] = [round(x, 2), round(y, 2)]
+        state["lastPointerEvent"] = event_type
         report()
 
-    motion.connect("motion", moved)
+    motion.connect("motion", lambda controller, x, y: pointer_position(controller, x, y, "motion"))
+    # A newly created compositor pointer can enter this widget without a
+    # separate motion signal. Both signals carry actual GTK coordinates.
+    motion.connect("enter", lambda controller, x, y: pointer_position(controller, x, y, "enter"))
     canvas.add_controller(motion)
     scroll = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.BOTH_AXES)
 

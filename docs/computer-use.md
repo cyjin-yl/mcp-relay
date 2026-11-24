@@ -238,6 +238,12 @@ package names include `libei1` and `libxkbcommon0`. After connecting EIS, relay 
 falls back to legacy Notify input within that permission session. `computer_info`
 reports the active transport in `details.inputTransport`. The helper does not
 change monitor settings, keyboard layouts or desktop permission databases.
+Pointer and keyboard capabilities are reported separately in `actions`; an absent
+or unsupported keyboard map does not imply that keyboard input is available.
+On older ScreenCast portals that do not supply a stable PipeWire stream serial,
+an observed monitor or capture-geometry change closes the grant. Run setup again
+before capturing or acting, so a reused PipeWire node ID cannot become an old
+frame's new target.
 
 Permissions last only for the current worker connection. Disconnecting, pausing,
 disabling computer control, cancelling a request, losing the portal, or leaving the

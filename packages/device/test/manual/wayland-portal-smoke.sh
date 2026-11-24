@@ -173,4 +173,7 @@ if ! "$relay_portal_ready"; then
   exit 1
 fi
 
+# Exercise the shipped CLI bundle first. The comprehensive backend harness
+# deliberately terminates the private portal daemon in its final check.
+node release/wayland-worker-smoke.cjs packages/device/dist/cli.cjs
 node release/wayland-portal-smoke.cjs

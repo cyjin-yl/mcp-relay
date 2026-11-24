@@ -37,6 +37,7 @@ class HelperInputTests(unittest.TestCase):
     def setUp(self):
         self.portal = Portal()
         self.portal.active = True
+        self.portal.granted_devices = 3
         self.portal.session = "/session/owned"
         self.portal.epoch = "one"
         self.portal.streams = [{"node": 24, "serial": 77, "logical": (400, 300),
@@ -132,6 +133,49 @@ class HelperInputTests(unittest.TestCase):
         with self.assertRaises(Failure) as caught:
             self.portal.stream(None, Context(2000))
         self.assertEqual(caught.exception.code, "display_required")
+
+    def test_pointer_only_consent_keeps_capture_and_pointer_actions(self):
+        self.portal.granted_devices = 2
+        state = self.portal.state(Context(2000), probe=False)
+        self.assertTrue(state["available"])
+        self.assertEqual(state["actions"], ["move", "click", "drag", "scroll"])
+        self.assertEqual(state["permissions"]["input"], "granted")
+        self.portal.granted_devices = 0
+        state = self.portal.state(Context(2000), probe=False)
+        self.assertTrue(state["available"])
+        self.assertEqual(state["actions"], [])
+        self.assertEqual(state["inputKind"], "none")
+
+    def eis_fixture(self):
+        return types.SimpleNamespace(generation=2, pump=lambda: None,
+            release=lambda: True, close=lambda: None)
+
+    def test_topology_change_without_serial_closes_before_opening_pipewire(self):
+        self.portal.streams[0]["serial"] = None
+        self.portal.eis_generation = 1
+        self.portal.eis = self.eis_fixture()
+        with self.assertRaises(Failure) as caught:
+            Portal.capture(self.portal, self.portal.streams[0], Context(2000))
+        self.assertEqual(caught.exception.code, "display_changed")
+        self.assertTrue(caught.exception.details["setupRequired"])
+        self.assertFalse(self.portal.active)
+        self.assertIsNone(self.portal.session)
+
+    def test_stable_serial_does_not_require_a_new_capture_grant(self):
+        self.portal.eis_generation = 1
+        self.portal.eis = self.eis_fixture()
+        self.portal.refresh_eis()
+        self.assertTrue(self.portal.active)
+        self.assertTrue(self.portal.needs_setup)
+        self.assertEqual(self.portal.eis_generation, 2)
+
+    def test_legacy_layout_change_without_serial_closes_capture_grant(self):
+        self.portal.streams[0]["serial"] = None
+        self.portal.layout.fenced = types.SimpleNamespace(is_set=lambda: True)
+        with self.assertRaises(Failure) as caught:
+            self.portal.check_capture_identity()
+        self.assertEqual(caught.exception.code, "display_changed")
+        self.assertFalse(self.portal.active)
 
 
 class HelperProtocolTests(unittest.TestCase):

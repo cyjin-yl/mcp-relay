@@ -7,7 +7,7 @@ ChatGPT and Claude MCP connector for devices you control.
 - Temporary access: one-time claim links for selected devices, expiring MCP tokens, owner revocation, and an LLM-ready connection file
 - Device agent: `npx -y @cyjin/mcp-relay connect --code ...` (outbound WSS, no inbound ports)
 - Server: Go + SQLite on OVH, Caddy for TLS/static, Cloudflare proxy
-- Tool packs: minimal file/shell tools, OMP hash-anchored patches/search, an optional persistent kernel, and opt-in native computer use (Windows, macOS, Linux X11, rooted Android)
+- Tool packs: minimal file/shell tools, OMP hash-anchored patches/search, an optional persistent kernel, and opt-in native computer use (Windows, macOS, Linux X11, desktop-approved Wayland portals, rooted Android)
 
 ## Layout
 

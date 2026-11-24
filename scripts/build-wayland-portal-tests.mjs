@@ -11,3 +11,13 @@ await build({
   outfile: "release/wayland-portal-smoke.cjs",
   sourcemap: false,
 });
+
+await build({
+  entryPoints: ["packages/device/test/manual/wayland-worker-smoke.ts"],
+  bundle: true,
+  platform: "node",
+  target: "node22",
+  format: "cjs",
+  outfile: "release/wayland-worker-smoke.cjs",
+  sourcemap: false,
+});

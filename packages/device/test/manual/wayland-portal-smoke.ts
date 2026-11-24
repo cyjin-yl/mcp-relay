@@ -12,6 +12,7 @@ import type { ComputerAction, ComputerDisplay, ComputerState, NativeContext } fr
 type Observation = {
   displayType: string; text: string; clicks: number; drags: number; motion: number;
   scrollX: number; scrollY: number; buttons: number[]; keys: string[];
+  pointerEntries: number; lastPointerEvent: "enter" | "motion";
   logicalWidth: number; logicalHeight: number; gdkScale: number;
   lastPointer: [number, number];
 };
@@ -265,6 +266,11 @@ async function main(): Promise<void> {
     await act({ type: "move", ...pixel(current.display, 550, 390) }, current.display);
     await until(() => Boolean(observed.lastPointer) && Math.abs(observed.lastPointer![0] - 550) <= 2 &&
       Math.abs(observed.lastPointer![1] - 390) <= 2, "Native GTK verifies a pointer target beyond half the physical image at scale2");
+    const motionBeforeReleaseCheck = Number(observed.motion);
+    await act({ type: "move", ...pixel(current.display, 560, 400) }, current.display);
+    await until(() => Number(observed.motion) > motionBeforeReleaseCheck && observed.lastPointerEvent === "motion" &&
+      Math.abs(observed.lastPointer![0] - 560) <= 2 && Math.abs(observed.lastPointer![1] - 400) <= 2,
+    "Native GTK receives subsequent motion from the new pointer device");
     assert.equal(observed.drags, drags, "Compositor must release input from the dead portal client");
     passed("helper death closes its grant, releases input and rejects old display instances");
 
@@ -279,13 +285,26 @@ async function main(): Promise<void> {
     await until(() => observed.gdkScale === changedScale &&
       Number(observed.logicalWidth) * changedScale === 1600, "Actual native client receives the compositor scale change");
     const clicksBeforeLayout = Number(observed.clicks);
-    await assert.rejects(() => backend.act({ type: "click", ...pixel(stale.display, 100, 100) }, stale.display, context()));
+    await assert.rejects(() => backend.act({ type: "click", ...pixel(stale.display, 100, 100) }, stale.display, context()),
+      error => ["display_changed", "portal_session_required", "input_unavailable"].includes(String((error as { code?: unknown }).code)));
     await delay(150);
     assert.equal(observed.clicks, clicksBeforeLayout, "A stale physical-size frame must never click after logical scale changes");
     passed("real compositor scale change with identical physical resolution fences stale input");
-    const layoutCapture = await screenshot("after-layout-change");
-    await assertColors(layoutCapture.data, layoutCapture.display, true);
-    passed("capture remains usable after the input mapping is invalidated");
+    const layoutState = await backend.inspect(context());
+    if (Number(state.details?.screenCastVersion) < 6) {
+      assert.equal(layoutState.available, false, "A portal without stable stream serials must close its grant after topology changes");
+      assert.equal(layoutState.details?.setupRequired, true);
+    }
+    if (!layoutState.available) {
+      await assert.rejects(() => backend.screenshot(undefined, context()),
+        error => ["display_changed", "portal_session_required"].includes(String((error as { code?: unknown }).code)));
+      assert.equal((await python("absent")).dialogAbsent, true, "A topology fence must require explicit new consent");
+      passed("topology change closes an unstable stream grant and refuses capture until explicit reauthorization");
+    } else {
+      const layoutCapture = await screenshot("after-layout-change");
+      await assertColors(layoutCapture.data, layoutCapture.display, true);
+      passed("a portal with stable stream identity retains capture after input mapping invalidation");
+    }
 
     await backend.close?.();
     if (expectedTransport === "gnome-legacy") {
@@ -301,6 +320,7 @@ async function main(): Promise<void> {
     }
     await authorize();
     current = await screenshot("reauthorized-layout");
+    assert.notEqual(current.display.instanceId, stale.display.instanceId, "Explicit consent creates a new monitor instance after layout changes");
     await act({ type: "click", ...pixel(current.display, 100, 100) }, current.display);
     await until(() => observed.clicks === clicksBeforeLayout + 1, "A newly authorized native mapping clicks after a real layout change");
     passed(expectedTransport === "eis"
