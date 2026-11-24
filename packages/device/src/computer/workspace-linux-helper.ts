@@ -147,7 +147,48 @@ def stop_record(record, immediate=False):
 def stop_owned(name):
     return stop_record(S["resources"].get(name))
 
-def configure_private():
+def owned_profile_directory(parts):
+    # Anchor each component to an already-open directory. Never follow an
+    # existing app-home/.config symlink into the physical user's profile.
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(str(ROOT), flags)
+    try:
+        if os.fstat(fd).st_uid != os.geteuid():
+            raise RuntimeError("workspace_profile_directory_not_owned")
+        for name in parts:
+            try: os.mkdir(name, 0o700, dir_fd=fd)
+            except FileExistsError: pass
+            child = os.open(name, flags, dir_fd=fd)
+            try:
+                if os.fstat(child).st_uid != os.geteuid():
+                    raise RuntimeError("workspace_profile_directory_not_owned")
+                os.fchmod(child, 0o700)
+            except Exception:
+                os.close(child)
+                raise
+            os.close(fd)
+            fd = child
+        return str(ROOT.joinpath(*parts))
+    finally:
+        os.close(fd)
+
+def configure_private(create_profiles=True):
+    # Different X servers alone do not separate profile-scoped singleton IPC.
+    # These persistent directories belong to this lease and survive handoff;
+    # applications keep their live profile instead of reopening the host's.
+    profiles = {
+        "HOME": ("app-home",),
+        "XDG_CONFIG_HOME": ("app-home", ".config"),
+        "XDG_DATA_HOME": ("app-home", ".local", "share"),
+        "XDG_CACHE_HOME": ("app-home", ".cache"),
+        "XDG_STATE_HOME": ("app-home", ".local", "state"),
+    }
+    for key, parts in profiles.items():
+        # Recovery must still expose a live app if it changed its profile's
+        # contents/permissions, or an older receipt predates private profiles.
+        # It restores X authentication, not a new application launch.
+        PRIVATE[key] = owned_profile_directory(parts) if create_profiles else str(ROOT.joinpath(*parts))
+    PRIVATE["CHROME_CONFIG_HOME"] = PRIVATE["XDG_CONFIG_HOME"]
     for key in ("WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_ID", "DESKTOP_STARTUP_ID"):
         PRIVATE.pop(key, None)
     PRIVATE["XDG_SESSION_TYPE"] = "x11"
@@ -157,7 +198,7 @@ def configure_private():
     (RUNTIME / "x").mkdir(mode=0o700, exist_ok=True)
 
 def restore_display(wait=3):
-    configure_private()
+    configure_private(False)
     if not S.get("display"):
         until = time.monotonic() + wait
         while True:
@@ -257,9 +298,16 @@ def physical_viewer_visible(record):
         return False
     finally: d.close()
 
+def profile_recovery_details():
+    verified = S.get("appProfileIsolated") is True and S.get("appHomeDirectory") == str(ROOT / "app-home")
+    result = {"profileBindingAtLaunch": "private-home" if verified else "unverified",
+              "profileCleanupPerformed": False}
+    if verified: result["appHomeDirectory"] = S["appHomeDirectory"]
+    return result
+
 def recovery_empty_result(reason):
     result = {"complete": True, "outcome": "no-resources", "inputRevoked": True,
-              "ownedDisplayRemoved": True, "details": {"reason": reason}}
+              "ownedDisplayRemoved": True, "details": {"reason": reason, **profile_recovery_details()}}
     with LOCK:
         S["recovery"] = result; S["phase"] = "empty"; save()
     return result
@@ -336,6 +384,7 @@ def recovery(reason):
                           "details": {"reason": reason, "appsPreserved": True, "physicalViewerVisible": visible,
                                       "physicalMonitorTopologyChanged": False,
                                       "returnDisplay": PHYSICAL["DISPLAY"], "viewerPid": viewer["pid"] if viewer else None}}
+        result["details"].update(profile_recovery_details())
         with LOCK:
             S["recovery"] = result
             S["phase"] = ("empty" if result["ownedDisplayRemoved"] else "returned") if result["complete"] else "cleanup_pending"
@@ -345,7 +394,8 @@ def recovery(reason):
         with LOCK:
             S["phase"] = "cleanup_pending"
             S["recovery"] = {"complete": False, "outcome": "cleanup-pending", "inputRevoked": True,
-                            "ownedDisplayRemoved": False, "details": {"reason": reason, "error": type(e).__name__}}
+                            "ownedDisplayRemoved": False, "details": {"reason": reason, "error": type(e).__name__,
+                                                                     **profile_recovery_details()}}
             save()
         return S["recovery"]
     finally:
@@ -356,7 +406,11 @@ def create():
     try:
         configure_private()
         cookie = os.urandom(16).hex()
-        with LOCK: S["cookie"] = cookie; save()
+        with LOCK:
+            S["cookie"] = cookie
+            S["appHomeDirectory"] = PRIVATE["HOME"]
+            S["appProfileIsolated"] = True
+            save()
         # Server authentication and the display number survive guardian loss.
         # A pipe would lose Xvfb's allocated number if the only reader died.
         r = quick([C["tools"]["xauth"], "-f", PRIVATE["XAUTHORITY"], "add", ":0", ".", cookie])
@@ -524,7 +578,7 @@ if len(sys.argv) > 2 and sys.argv[2] == "--recover":
         prior = json.loads(STATE.read_text())
         if prior.get("instanceId") != C["instanceId"]: raise RuntimeError("resource_identity_mismatch")
         S = prior
-        configure_private()
+        configure_private(False)
     recovery("recovery")
     sys.exit(0 if S["recovery"] and S["recovery"]["complete"] else 1)
 

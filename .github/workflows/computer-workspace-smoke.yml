@@ -46,7 +46,7 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            xpra xvfb xauth xdotool x11-utils openbox xterm imagemagick python3-xlib python3-pil
+            xpra xvfb xauth xdotool x11-utils openbox xterm chromium imagemagick python3-xlib python3-pil
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - name: Check ownership, transport, updater and mode separation

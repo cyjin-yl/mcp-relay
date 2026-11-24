@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 import { createLinuxWorkspaceProvider, linuxWorkspaceRpc } from "../../src/computer/workspace-linux.js";
 import { linuxWorkspaceHelper } from "../../src/computer/workspace-linux-helper.js";
 import { runNative } from "../../src/computer/native.js";
@@ -20,10 +21,12 @@ const ctx = { timeoutMs: 15000 };
 const created: ChildProcess[] = [];
 const fixtureIdentities = new Map<number, ProcessIdentity>();
 const caseNames: string[] = [];
+const browserProfiles = new Set<string>();
 interface ProcessIdentity { pid: number; start: string }
 interface NativeState {
   phase: string;
   display?: string;
+  appHomeDirectory?: string;
   guardian: ProcessIdentity;
   resources: Record<string, ProcessIdentity>;
   creationIntents?: Record<string, { stage: string; protocol: string }>;
@@ -106,6 +109,34 @@ async function waitFor<T>(fn: () => Promise<T | undefined>, ms = 12000): Promise
 async function physicalState() {
   return { active: await command(["xdotool", "getactivewindow"]),
     pointer: await command(["xdotool", "getmouselocation", "--shell"]) };
+}
+interface NativeWindow { id: number; pid: number; title: string; mapped: boolean }
+async function nativeWindows(env: NodeJS.ProcessEnv): Promise<NativeWindow[]> {
+  const script = [
+    "import json; from Xlib import X,display",
+    "d=display.Display(); root=d.screen().root; p=root.get_full_property(d.intern_atom('_NET_CLIENT_LIST'),X.AnyPropertyType)",
+    "rows=[]",
+    "for wid in (p.value if p else []):",
+    " try:",
+    "  w=d.create_resource_object('window',int(wid)); name=w.get_full_property(d.intern_atom('_NET_WM_NAME'),X.AnyPropertyType)",
+    "  title=bytes(name.value).decode('utf-8','replace') if name else str(w.get_wm_name() or '')",
+    "  pid=w.get_full_property(d.intern_atom('_NET_WM_PID'),X.AnyPropertyType)",
+    "  rows.append(dict(id=int(wid),pid=int(pid.value[0]) if pid else 0,title=title,mapped=w.get_attributes().map_state==X.IsViewable))",
+    " except Exception: pass",
+    "d.close(); print(json.dumps(rows))",
+  ].join("\n");
+  return (JSON.parse(await command(["python3", "-c", script], env)) as NativeWindow[]).sort((a, b) => a.id - b.id);
+}
+function browserFixtureProcesses(): ProcessIdentity[] {
+  return readdirSync("/proc").filter(pid => /^\d+$/.test(pid)).flatMap(pid => {
+    try {
+      const argv = readFileSync("/proc/" + pid + "/cmdline", "utf8").split("\0");
+      const owned = [...browserProfiles].some(profile => argv.some(arg =>
+        arg === "--user-data-dir=" + profile || arg === "--database=" + join(profile, "Crash Reports")));
+      const identity = owned ? processIdentity(Number(pid)) : undefined;
+      return identity ? [identity] : [];
+    } catch { return []; }
+  });
 }
 async function run() {
   await command(["python3", "-m", "py_compile", join(directory, "guardian-check.py")]);
@@ -244,6 +275,138 @@ async function run() {
     return { context, options, resource: () => checkpointed };
   }
 
+
+  // No --user-data-dir: the production HOME/XDG boundary must stop Chromium's
+  // normal single-instance launch from reaching the existing physical browser.
+  const browserVersion = await command(["/usr/bin/chromium", "--version"]);
+  const physicalBrowserHome = join(directory, "physical-browser-home");
+  const browserEnv = { ...testEnv, HOME: physicalBrowserHome,
+    XDG_CONFIG_HOME: join(physicalBrowserHome, ".config"),
+    XDG_DATA_HOME: join(physicalBrowserHome, ".local", "share"),
+    XDG_CACHE_HOME: join(physicalBrowserHome, ".cache"),
+    XDG_STATE_HOME: join(physicalBrowserHome, ".local", "state"),
+    CHROME_CONFIG_HOME: join(physicalBrowserHome, ".config") };
+  for (const name of [browserEnv.HOME, browserEnv.XDG_CONFIG_HOME, browserEnv.XDG_DATA_HOME,
+    browserEnv.XDG_CACHE_HOME, browserEnv.XDG_STATE_HOME]) mkdirSync(name, { recursive: true, mode: 0o700 });
+  const browserArgs = ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--disable-background-networking",
+    "--disable-component-update", "--disable-sync", "--disable-extensions", "--disable-default-apps",
+    "--disable-breakpad", "--disable-crash-reporter", "--no-first-run", "--no-default-browser-check"];
+  function browserPage(name: string, prefix: string, initial: string): string {
+    const filename = join(directory, name + ".html");
+    writeFileSync(filename, "<!doctype html><meta charset=utf-8><input id=entry autofocus><script>" +
+      "const e=document.getElementById('entry');e.value=" + JSON.stringify(initial) + ";" +
+      "function remember(){let stored=false;try{localStorage.setItem('relayFixture',e.value);" +
+      "stored=localStorage.getItem('relayFixture')===e.value}catch{}document.title=" + JSON.stringify(prefix) +
+      "+e.value+(stored?' [stored]':' [volatile]')}e.addEventListener('input',remember);remember();e.focus();" +
+      "</script>");
+    return pathToFileURL(filename).href;
+  }
+  const physicalBrowserTitle = "Relay physical browser " + randomUUID() + " ";
+  const privateBrowserTitle = "Relay private browser " + randomUUID() + " ";
+  const controlBrowserTitle = "Relay shared-profile control " + randomUUID() + " ";
+  const physicalBrowserUrl = browserPage("physical-browser", physicalBrowserTitle, "Physical42");
+  const privateBrowserUrl = browserPage("private-browser", privateBrowserTitle, "");
+  const controlBrowserUrl = browserPage("shared-profile-control", controlBrowserTitle, "");
+  const physicalProfile = join(physicalBrowserHome, ".config", "chromium");
+  browserProfiles.add(physicalProfile);
+  const physicalBrowser = await ownedProcess(["/usr/bin/chromium", ...browserArgs, "--app=" + physicalBrowserUrl], browserEnv);
+  const physicalBrowserWindow = await waitFor(async () => (await nativeWindows(browserEnv))
+    .find(w => w.mapped && w.title === physicalBrowserTitle + "Physical42 [stored]"), 20000);
+  assert.equal(physicalBrowserWindow.pid, physicalBrowser.pid);
+  const physicalBrowserRecord = processIdentity(physicalBrowserWindow.pid)!;
+  const physicalProfileLock = readlinkSync(join(physicalProfile, "SingletonLock"));
+  assert.ok(physicalProfileLock.endsWith("-" + physicalBrowserRecord.pid));
+  await command(["xdotool", "windowactivate", "--sync", String(physicalBrowserWindow.id)], browserEnv);
+  await command(["xdotool", "mousemove", "45", "55"], browserEnv);
+  const browserPhysicalBefore = await physicalState();
+  const physicalBrowserWindows = (await nativeWindows(browserEnv)).filter(w => w.pid === physicalBrowserRecord.pid);
+  const browserProvider = createLinuxWorkspaceProvider(browserEnv);
+  const browserFixture = fixtureContext("single-instance-browser-profile");
+  const browserOptions = { ...browserFixture.options, launch: {
+    executable: "/usr/bin/chromium", args: [...browserArgs, "--app=" + privateBrowserUrl] } };
+  const browserWorkspace = await browserProvider.open(browserOptions, browserFixture.context);
+  browserProfiles.add(join(String(browserWorkspace.data.appHomeDirectory), ".config", "chromium"));
+  const browserHeartbeat = setInterval(() => {
+    void browserProvider.renew(browserWorkspace, browserOptions.expiresAt, browserFixture.context).catch(() => {});
+  }, 2000);
+  try {
+    const privateBrowserEnv = privateEnvironment(browserWorkspace);
+    const privateBrowserWindow = await waitFor(async () => (await nativeWindows(privateBrowserEnv))
+      .find(w => w.mapped && w.title.trim().replace(/\s+/g, " ") === privateBrowserTitle.trim() + " [stored]"), 20000)
+      .catch(async error => {
+        writeFileSync(join(directory, "private-browser-window-failure.json"),
+          JSON.stringify({ error: String(error), windows: await nativeWindows(privateBrowserEnv), state: nativeState(browserWorkspace) }));
+        throw error;
+      });
+    const browserNative = nativeState(browserWorkspace);
+    const appRecord = browserNative.resources.app!;
+    assert.ok(appRecord);
+    assert.equal(privateBrowserWindow.pid, appRecord.pid);
+    assert.notEqual(appRecord.pid, physicalBrowserRecord.pid);
+    const appHome = String(browserWorkspace.data.appHomeDirectory);
+    assert.equal(appHome, join(String(browserWorkspace.data.directory), "app-home"));
+    assert.equal(browserNative.appHomeDirectory, appHome);
+    for (const name of [appHome, join(appHome, ".config"), join(appHome, ".local", "share"),
+      join(appHome, ".cache"), join(appHome, ".local", "state")]) assert.equal(statSync(name).mode & 0o777, 0o700);
+    const privateProfile = join(appHome, ".config", "chromium");
+    browserProfiles.add(privateProfile);
+    const privateProfileLock = readlinkSync(join(privateProfile, "SingletonLock"));
+    assert.ok(privateProfileLock.endsWith("-" + appRecord.pid));
+    assert.notEqual(privateProfile, physicalProfile);
+    await waitFor(async () => existsSync(join(privateProfile, "Default", "Preferences")) ? true : undefined);
+    const homeInode = statSync(appHome).ino;
+    await browserProvider.act(browserWorkspace, { type: "text", text: "Profile42" }, ctx);
+    const privateTitleAfterInput = privateBrowserTitle + "Profile42 [stored]";
+    await waitFor(async () => (await nativeWindows(privateBrowserEnv))
+      .find(w => w.id === privateBrowserWindow.id && w.title === privateTitleAfterInput));
+    assert.equal(existsSync(join(privateProfile, "Default", "Local Storage", "leveldb")), true);
+    assert.deepEqual((await nativeWindows(browserEnv)).filter(w => w.pid === physicalBrowserRecord.pid), physicalBrowserWindows);
+    assert.deepEqual(await physicalState(), browserPhysicalBefore, "private Chromium reused or focused the physical browser");
+    assert.equal(matches(physicalBrowserRecord), true);
+    assert.equal(readlinkSync(join(physicalProfile, "SingletonLock")), physicalProfileLock);
+    const browserFrame = await browserProvider.capture(browserWorkspace, ctx);
+    writeFileSync(join(directory, "private-browser.png"), browserFrame.data);
+    clearInterval(browserHeartbeat);
+    killExact(nativeState(browserWorkspace).guardian);
+    const browserRecovery = await browserProvider.recover(browserWorkspace, browserOptions,
+      "guardian_killed_profile_isolation", browserFixture.context);
+    assert.equal(browserRecovery.complete, true, JSON.stringify(browserRecovery));
+    assert.equal(browserRecovery.outcome, "handoff-viewer");
+    assert.equal(browserRecovery.details?.physicalViewerVisible, true);
+    assert.equal(matches(appRecord), true);
+    assert.equal(statSync(appHome).ino, homeInode);
+    assert.equal(readlinkSync(join(privateProfile, "SingletonLock")), privateProfileLock);
+    assert.equal(existsSync(join(privateProfile, "Default", "Preferences")), true);
+    assert.equal(existsSync(join(privateProfile, "Default", "Local Storage", "leveldb")), true);
+    assert.ok((await nativeWindows(privateBrowserEnv))
+      .find(w => w.id === privateBrowserWindow.id && w.pid === appRecord.pid && w.title === privateTitleAfterInput));
+    assert.deepEqual((await nativeWindows(browserEnv)).filter(w => w.pid === physicalBrowserRecord.pid), physicalBrowserWindows);
+    await assert.rejects(() => browserProvider.act(browserWorkspace, { type: "text", text: "forbidden" }, ctx));
+
+    // Negative control only between owned synthetic desktops: retain physical
+    // HOME/XDG but supply private DISPLAY, demonstrating the unsafe old route.
+    await command(["/usr/bin/chromium", ...browserArgs, "--app=" + controlBrowserUrl],
+      { ...browserEnv, DISPLAY: privateBrowserEnv.DISPLAY, XAUTHORITY: privateBrowserEnv.XAUTHORITY });
+    const routed = await waitFor(async () => (await nativeWindows(browserEnv))
+      .find(w => w.mapped && w.title.trim().replace(/\s+/g, " ") === controlBrowserTitle.trim() + " [stored]"));
+    assert.equal(routed.pid, physicalBrowserRecord.pid);
+    assert.equal((await nativeWindows(privateBrowserEnv)).some(w => w.title.startsWith(controlBrowserTitle)), false);
+    await command(["xdotool", "windowclose", String(routed.id)], browserEnv);
+    await waitFor(async () => !(await nativeWindows(browserEnv)).some(w => w.id === routed.id) ? true : undefined);
+    assert.equal(matches(physicalBrowserRecord), true);
+    assert.deepEqual((await nativeWindows(browserEnv)).filter(w => w.pid === physicalBrowserRecord.pid), physicalBrowserWindows);
+    recordCase("single-instance-profile-isolation-and-persistent-handoff", {
+      browserVersion, physicalBrowserPid: physicalBrowserRecord.pid, privateBrowserPid: appRecord.pid,
+      physicalProfile, privateProfile, appHomeDirectory: appHome,
+      physicalBrowserUnchangedByWorkspace: true, physicalFocusAndPointerUnchangedBeforeRecovery: true,
+      privateWindowOnPrivateDisplay: true, browserLocalStorageAccepted: true, sameAppPidAndWindowAfterRecovery: true,
+      privateProfileRetainedAfterGuardianDeath: true,
+      sharedProfileNegativeControl: { routedToPhysicalInstance: true, controlWindowClosed: true, syntheticDisplaysOnly: true },
+      recovery: browserRecovery,
+    });
+  } finally { clearInterval(browserHeartbeat); }
+
+
   // One real long-lived xdotool command holds a private mouse button, waits,
   // then attempts a trailing move. Kill the guardian while the button is down.
   const gestureFixture = fixtureContext("guardian-mid-input");
@@ -377,7 +540,7 @@ async function run() {
   writeFileSync(join(evidenceDirectory, "receipt.json"), JSON.stringify({ passed: caseNames.length, directory, display,
     physicalStateUnchanged: true, testedHarnessSha256, helperSha256,
     deepJournalBytes: Buffer.byteLength(directory), shortPrivateRuntime: String(resource!.data.runtimeDirectory),
-    faultInjection: "Three copied helpers replace one declared boundary comment with SIGSTOP; production guardian code is otherwise unchanged.",
+    faultInjection: "Three copied helpers replace one declared boundary comment with SIGSTOP; production guardian code is otherwise unchanged. Chromium shared-profile negative control uses only owned synthetic displays.",
     cases: caseNames }, null, 2));
   process.stdout.write(JSON.stringify({ passed: caseNames.length, directory, evidenceDirectory, testedHarnessSha256, helperSha256 }) + "\n");
 
@@ -389,6 +552,7 @@ run().catch(error => {
   // Every native resource is remembered at its first durable checkpoint, even
   // when open() throws. Fence creation before cleaning only our own fixtures.
   const provider = createLinuxWorkspaceProvider(testEnv);
+  const browserChildren = browserFixtureProcesses();
   for (const { resource, context } of nativeFixtures.values()) {
     try {
       writeFileSync(context.revocationPath, JSON.stringify({ reason: "test_fixture_complete" }));
@@ -408,5 +572,8 @@ run().catch(error => {
   }
   for (const child of created.reverse()) {
     try { if (child.pid && matches(fixtureIdentities.get(child.pid))) process.kill(-child.pid, "SIGTERM"); } catch { /* exited */ }
+  }
+  for (const record of browserChildren) {
+    try { if (matches(record)) process.kill(record.pid, "SIGTERM"); } catch { /* exact owned browser descendant exited */ }
   }
 });

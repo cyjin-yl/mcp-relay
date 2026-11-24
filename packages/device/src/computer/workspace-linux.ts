@@ -2,14 +2,14 @@ import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createLinuxBackend } from "./linux.js";
 import { findExecutable, nativeEnvironment, runNative } from "./native.js";
 import { linuxWorkspaceHelper } from "./workspace-linux-helper.js";
 import { writeWorkspaceJson } from "./workspace-state.js";
 import { ComputerError, type NativeCommand, type NativeContext, type NativeResult } from "./types.js";
-import type { WorkspaceCapabilities, WorkspaceProvider, WorkspaceProviderContext,
+import type { WorkspaceCapabilities, WorkspaceOpenOptions, WorkspaceProvider, WorkspaceProviderContext,
   WorkspaceRecoveryResult, WorkspaceResource } from "./workspace-types.js";
 
 interface GuardianState {
@@ -17,6 +17,8 @@ interface GuardianState {
   instanceId: string;
   phase: "starting" | "active" | "returning" | "returned" | "empty" | "cleanup_pending";
   display?: string;
+  appHomeDirectory?: string;
+  appProfileIsolated?: boolean;
   inputRevoked: boolean;
   error?: string;
   recovery?: WorkspaceRecoveryResult;
@@ -24,12 +26,29 @@ interface GuardianState {
 interface LinuxResourceData {
   directory: string;
   runtimeDirectory: string;
+  appHomeDirectory?: string;
   secret: string;
   helper: string;
   python: string;
   environment: NodeJS.ProcessEnv;
 }
 const failure = (code: string, message: string) => new ComputerError(code, message);
+
+function launchProfileOverride(launch: WorkspaceOpenOptions["launch"]): string | undefined {
+  if (!launch) return undefined;
+  const executable = basename(launch.executable).toLowerCase();
+  const mozilla = /^(?:firefox(?:-esr|-beta|-nightly|-developer-edition)?|thunderbird)(?:\.bin)?$/.test(executable);
+  const code = /^(?:code(?:-insiders|-oss)?|codium|vscodium|cursor|windsurf)(?:\.bin)?$/.test(executable);
+  for (const argument of launch.args) {
+    const match = /^--?([^=]+)(?:=|$)/.exec(argument);
+    if (!match) continue;
+    const option = match[1]!.toLowerCase();
+    if (["user-data-dir", "profile-directory", "env:userinstallation"].includes(option)
+      || mozilla && ["profile", "p", "remote"].includes(option)
+      || code && ["reuse-window", "r"].includes(option)) return match[0]!.replace(/=$/, "");
+  }
+  return undefined;
+}
 
 function resourceData(resource: WorkspaceResource): LinuxResourceData {
   const d = resource.data;
@@ -99,6 +118,7 @@ export function createLinuxWorkspaceProvider(environment: NodeJS.ProcessEnv = pr
     independentWatchdog: true, unicodeText: true, clipboardBoundary: "isolated",
     details: { mode: "private-x11-server", physicalMonitorTopologyChanged: false,
       existingWindowMigration: "unsupported", clipboardBoundary: "isolated",
+      applicationProfiles: "persistent private HOME and XDG directories per workspace; explicit shared-profile/reuse overrides are rejected",
       handoff: "preserve applications in an Xpra viewer on the original physical desktop",
       setup: "Install xpra, xvfb, xauth, xdotool, openbox, ImageMagick, python3-xlib and python3-pil; run relay from the desktop user session." }
   };
@@ -155,6 +175,10 @@ export function createLinuxWorkspaceProvider(environment: NodeJS.ProcessEnv = pr
     probe,
     async open(options, ctx) {
       if (existsSync(ctx.revocationPath)) throw failure("workspace_closed", "Workspace creation was revoked.");
+      const override = launchProfileOverride(options.launch);
+      if (override) throw failure("workspace_launch_override_unsupported",
+        "Isolated Linux launch cannot use " + override + " to select an existing profile or instance. " +
+        "Remove the override for a private workspace profile, or choose foreground mode explicitly.");
       const checked = await probe(ctx);
       if (!checked.available) throw failure("isolated_workspace_unavailable", checked.reason!);
       const directory = join(ctx.journalDirectory, "linux-native");
@@ -164,7 +188,8 @@ export function createLinuxWorkspaceProvider(environment: NodeJS.ProcessEnv = pr
       // Linux AF_UNIX names have a short fixed limit. Durable journals can be
       // arbitrarily deep, so IPC alone uses a fresh private 0700 runtime path.
       const runtimeDirectory = mkdtempSync("/tmp/relay-ws-");
-      const data: LinuxResourceData = { directory, runtimeDirectory, secret: randomBytes(32).toString("hex"), helper,
+      const data: LinuxResourceData = { directory, runtimeDirectory, appHomeDirectory: join(directory, "app-home"),
+        secret: randomBytes(32).toString("hex"), helper,
         python: dependencies.python!, environment: env };
       const resource: WorkspaceResource = {
         providerId: "linux-xpra-workspace", leaseId: options.leaseId, instanceId: randomUUID(),
@@ -193,6 +218,9 @@ export function createLinuxWorkspaceProvider(environment: NodeJS.ProcessEnv = pr
         ctx.signal?.throwIfAborted();
         const current = state(data, resource);
         if (current?.phase === "active") {
+          if (current.appHomeDirectory !== data.appHomeDirectory || current.appProfileIsolated !== true) {
+            throw failure("workspace_resource_invalid", "Linux workspace private application profile was not verified.");
+          }
           await linuxWorkspaceRpc(data, { operation: "renew", expiresAt: options.expiresAt }, { ...ctx, timeoutMs: 3000 });
           await ctx.checkpoint(resource);
           return resource;

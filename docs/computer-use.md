@@ -81,6 +81,15 @@ launch specification can start an application directly in the private workspace.
 Providers refuse unsupported adoption of existing foreground windows; they do not
 silently move unrelated applications.
 
+Linux gives launched applications a persistent home and XDG configuration, data,
+cache and state directories owned by that lease. This keeps ordinary browser and
+other single-instance application profiles separate from the foreground session.
+Known profile and existing-instance override options are rejected before launch.
+To use an already-open application or its existing sign-in state, choose foreground
+mode. The private application home is preserved with the workspace after handoff;
+recovery does not delete its files. Use applications that honor these directories. Custom launchers that hard-code
+another profile or connect to another display can still affect that other session.
+
 On Windows, the default open attempts native automatic sign-in with its viewer
 hidden. If Windows requires credentials, it fails closed and returns its owned
 resources; the model must not type credentials into the user's desktop. When the
