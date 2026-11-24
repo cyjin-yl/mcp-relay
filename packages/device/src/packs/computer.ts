@@ -23,7 +23,7 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("drag"), fromX: coordinate, fromY: coordinate, toX: coordinate, toY: coordinate,
     durationMs: z.number().int().min(100).max(5000).optional() }).strict(),
   z.object({ type: z.literal("scroll"), direction: z.enum(["up", "down", "left", "right"]),
-    amount: z.number().int().min(1).max(40).optional(), x: coordinate.optional(), y: coordinate.optional() }).strict(),
+    amount: z.number().int().min(1).max(40).optional().describe("Number of scroll steps (1–40); defaults to 3."), x: coordinate.optional(), y: coordinate.optional() }).strict(),
   z.object({ type: z.literal("key"), keys: z.array(z.string().min(1).max(48)).min(1).max(8) }).strict(),
   z.object({ type: z.literal("text"), text: z.string().max(16384) }).strict()
 ]);
@@ -246,7 +246,7 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
           throw new ComputerError("stale_frame", "Unknown or expired frame. Capture a fresh screenshot before acting.");
         }
         checkAction(input.action, frame.display);
-        const state = await backend.inspect(context(), frame.display.id);
+        const state = await backend.inspect({ ...context(), expectedAppId: frame.appId }, frame.display.id);
         if (!state.available) throw new ComputerError("desktop_unavailable", state.reason ?? "Desktop is unavailable.");
         if (!state.actions.includes(input.action.type)) {
           throw new ComputerError("unsupported_action", "This device does not support action " + input.action.type + ".");
@@ -264,7 +264,7 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
         if (settings().paused) throw new ComputerError("computer_paused", "Computer control is paused.");
         frames.clear(); // Consume all pre-action observations, including on unknown outcomes.
         attempted = true;
-        const outcome = await backend.act(input.action, current, context());
+        const outcome = await backend.act(input.action, current, { ...context(), expectedAppId: frame.appId });
         const receipt = { ok: true, request_id: requestId, action: actionType,
           completed_at: new Date(now()).toISOString(), elapsed_ms: now() - startedAt,
           ...outcome, requires_new_frame: true };
@@ -281,7 +281,9 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
         }
       } catch (error) {
         const result = errorResult(error, { ...(requestId ? { request_id: requestId, action: actionType } : {}),
-          mayHaveApplied: attempted, requires_new_frame: attempted });
+          // Setup can mutate even though no computer_action was attempted.
+          mayHaveApplied: attempted || (error instanceof ComputerError && error.details?.mayHaveApplied === true),
+          requires_new_frame: attempted });
         if (attempted && requestId && fingerprint) remember(requestId, fingerprint, result);
         return result;
       } finally {

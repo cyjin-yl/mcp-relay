@@ -49,6 +49,8 @@ export interface ComputerState {
 export interface NativeContext {
   signal?: AbortSignal;
   timeoutMs: number;
+  /** Application identity bound to the captured frame; later observations must never replace it. */
+  expectedAppId?: string;
 }
 
 export interface CapturedScreen {

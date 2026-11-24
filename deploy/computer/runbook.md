@@ -1,12 +1,12 @@
-# Computer use 0.1.9：受管设备启用与验收
+# Computer use 0.1.11：受管设备启用与验收
 
-本手册供已有授权的部署任务使用。目标是让已有支持 OTA 的受管设备经正常更新升到 0.1.9，再启用 computer pack；不重新配对，不替换设备凭据，不清空 kernel。发布、设备在线、版本就绪、功能启用、实际工具验收是不同状态，必须分别记录。
+本手册供已有授权的部署任务使用。目标是让已有支持 OTA 的受管设备经正常更新升到 0.1.11，再启用 computer pack；不重新配对，不替换设备凭据，不清空 kernel。发布、设备在线、版本就绪、功能启用、实际工具验收是不同状态，必须分别记录。
 
 适用于 Linux（包括 PVE 宿主上的本机 QEMU VM）、Windows、macOS，以及已有授权 `su` 的 Android。平台能力和限制见 [computer-use.md](../../docs/computer-use.md)，OTA 恢复约定见 [WINDOWS_AND_UPDATES.md](../../docs/WINDOWS_AND_UPDATES.md)。Android 桥和自有测试界面见 [Android input README](../../packages/android-input/README.md)。
 
 ## 1. 准备发布与已有设备入口
 
-发布者先完成最终源码验证和平台原生验收，固定版本化 CLI、SHA-256 和对应 harness，再发布版本化文件，最后原子更新受信 HTTPS stable manifest。具体流程见 [0.1.9 release procedure](../../docs/RELEASE_0_1_9.md)。验收记录中的摘要必须来自最终发布回执，不能沿用早期 CI 候选的摘要。设备 updater 会验证 HTTPS 同源、下载摘要、Node 语法、导入、版本和认证注册；Node 需至少 22.5。
+发布者先完成最终源码验证和平台原生验收，固定版本化 CLI、SHA-256 和对应 harness，再发布版本化文件，最后原子更新受信 HTTPS stable manifest。具体流程见 [0.1.11 verification and publication](../../docs/VERIFICATION_20261124_0_1_11.md)。验收记录中的摘要必须来自最终发布回执，不能沿用早期 CI 候选的摘要。设备 updater 会验证 HTTPS 同源、下载摘要、Node 语法、导入、版本和认证注册；Node 需至少 22.5。
 
 每台设备的部署任务记录以下非秘密信息：
 
@@ -17,11 +17,11 @@
 
 不要记录 token、配对码、config 正文、用户输入文本或 PNG base64。保留原 launcher/Termux 环境；不要另起一个同身份 worker 来“试一下”。
 
-**管理命令必须用新版 CLI。** OTA 后旧 bootstrap/launcher 文件仍可能显示旧版本；它的 `connect` 可以选择新版 supervisor，但旧文件并不会把 `computer-enable` 等新子命令转发给新版。使用已验证的 0.1.9 bundle 的绝对路径，并先确认：
+**管理命令必须用新版 CLI。** OTA 后旧 bootstrap/launcher 文件仍可能显示旧版本；它的 `connect` 可以选择新版 supervisor，但旧文件并不会把 `computer-enable` 等新子命令转发给新版。使用已验证的 0.1.11 bundle 的绝对路径，并先确认：
 
 ```sh
-node /absolute/path/to/verified-0.1.9/cli.cjs --version
-node /absolute/path/to/verified-0.1.9/cli.cjs update-status --config /absolute/path/to/device.json
+node /absolute/path/to/verified-0.1.11/cli.cjs --version
+node /absolute/path/to/verified-0.1.11/cli.cjs update-status --config /absolute/path/to/device.json
 ```
 
 下面所有 `CLI` 均指这个新版文件，`CONFIG` 指同一设备实际使用的 config。Windows 可在 PowerShell 中使用绝对路径调用 `node.exe`，参数含义相同。
@@ -62,7 +62,7 @@ node "$CLI" update-check --config "$CONFIG"
 node "$CLI" update-status --config "$CONFIG"
 ```
 
-观察 `version=0.1.9`、`supervisorVersion=0.1.9`、目标 SHA、`phase=running`，再核对一次新的设备注册或真实工具回调。短暂断线属于最终切换过程；不要因为 WebSocket 刚重连便断言热更新通过。
+观察 `version=0.1.11`、`supervisorVersion=0.1.11`、目标 SHA、`phase=running`，再核对一次新的设备注册或真实工具回调。短暂断线属于最终切换过程；不要因为 WebSocket 刚重连便断言热更新通过。
 
 遇到以下状态保留任务并等待：
 
@@ -75,7 +75,7 @@ node "$CLI" update-status --config "$CONFIG"
 | candidate 未就绪、摘要错误或启动失败 | 读取失败/回退原因，保留已验证旧版；遵守失败摘要冷却，不循环强制重试。 |
 | 暂无交互桌面、已锁屏、权限未知或不足 | 记录 blocked/unknown。不要模拟解锁、自动接受权限或改变系统授权策略。 |
 
-已在 0.1.7 supervisor 上排队的 `update-check` 仍有用；**本地 safe reload 从 0.1.8 supervisor 起可用**。若先用已验证的新 CLI 写了 enable sidecar，0.1.7 supervisor 不会自行理解 reload 文件；之后正常 OTA 启动的 0.1.9 worker 会读取 sidecar，新的 supervisor 会消费启动前已有的请求。
+已在 0.1.7 supervisor 上排队的 `update-check` 仍有用；**本地 safe reload 从 0.1.8 supervisor 起可用**。若先用已验证的新 CLI 写了 enable sidecar，0.1.7 supervisor 不会自行理解 reload 文件；之后正常 OTA 启动的 0.1.11 worker 会读取 sidecar，新的 supervisor 会消费启动前已有的请求。
 
 ## 3. 启用 sidecar，并等待 safe reload
 
@@ -185,11 +185,11 @@ setup 安装当前 standalone bundle 内嵌的第一方签名 APK，并核对 em
 由开发容器构建并核对最终 harness 摘要。真机运行入口如下，输出目录必须是新的私有目录：
 
 ```sh
-node /absolute/path/to/verified/android-computer-smoke.cjs --setup \
+node /absolute/path/to/verified/android-computer-smoke.cjs \
   --out "$HOME/.mcp-relay/computer-test-<unique-run-id>"
 ```
 
-harness 仅启动 `dev.cyjin.mcprelay.input/.ProbeActivity`。每次 action 前后核对自有前台 Activity；截图前、捕获 metadata 和捕获后观察都通过才落盘。焦点未知或切走即失败停止，不能把另一个 app 的图像保存为测试证据。不要在验收进行中切换应用。
+输入桥已通过上一节安装和摘要核对时，验收不再传 `--setup`。harness 仅启动 `dev.cyjin.mcprelay.input/.ProbeActivity`。每次 action 前后核对自有前台 Activity；截图前、捕获 metadata 和捕获后观察都通过才落盘。焦点未知或切走即失败停止，不能把另一个 app 的图像保存为测试证据。不要在验收进行中切换应用。
 
 验收包括中文、emoji、换行的精确 UTF-8 字节数/摘要，自有文本框 Backspace、自有按钮 tap、自有 pad drag、自有 scroll view 滚动，以及 selected/enabled IME 的最终一致性。BACK 清理只在自有 Activity 仍为前台时发送；回执据实际后续焦点报告是否已关闭。
 
@@ -216,7 +216,7 @@ harness 直接验证本机 backend；**它不能替代第 4 节对实际 relay �
 - 凭据/设备身份未改变，原有环境恢复入口仍有效；无竞争 worker。
 - 后续 OTA supervisor 持续受管，默认检查周期仍在；离线/旧 kernel 设备保持真实 pending 状态。
 
-## 7. 暂停、禁用与故障处理
+## 8. 暂停、禁用与故障处理
 
 ```sh
 node "$CLI" computer-pause --config "$CONFIG"

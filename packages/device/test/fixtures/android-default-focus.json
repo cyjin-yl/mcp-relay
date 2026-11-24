@@ -1,0 +1,6 @@
+{
+  "sourceSha256": "60408aa685457e147f8c39fadebfcdd561fd813237eccf93adb298ebadc5501c",
+  "observedAt": "2026-11-23T23:58:10.141Z",
+  "displays": "  Display: mDisplayId=0\n  mCurrentFocus=Window{fixture u0 dev.cyjin.mcprelay.input/dev.cyjin.mcprelay.input.ProbeActivity}\n  mFocusedApp=ActivityRecord{fixture u0 dev.cyjin.mcprelay.input/.ProbeActivity t1, isEmbedded=false}\n",
+  "windows": "\n"
+}

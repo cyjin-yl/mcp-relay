@@ -70,36 +70,225 @@ function sections(text: string): Record<string, string> {
 
 /** Parse only display metadata. No UI text or app document content is inspected. */
 export function parseAndroidGeometry(display: string, window: string, size: string): Geometry | undefined {
-  const candidates = display.split(/\r?\n/).filter(line => line.includes("DisplayInfo{"));
-  for (const line of candidates) {
-    if (/\bdisplayId\s+[1-9]\d*\b/.test(line)) continue;
+  // Window dumps can contain multiple displays and a second, unscoped windows dump.
+  const headers = [...window.matchAll(/^[ \t]*(?:Display:\s*mDisplayId=(\d+)\b[^\n]*|WINDOW MANAGER\b[^\n]*)/gm)];
+  const defaultSections = headers.flatMap((header, index) => header[1] === "0"
+    ? [window.slice(header.index! + header[0].length, headers[index + 1]?.index ?? window.length)] : []);
+  const current: Geometry[] = [];
+  let invalidCurrent = false;
+  const readInfo = (line: string): Geometry | undefined => {
     const real = /\breal\s+(\d+)\s*x\s*(\d+)/.exec(line);
-    if (!real) continue;
-    const width = Number(real[1]), height = Number(real[2]);
-    if (!validDimension(width) || !validDimension(height)) continue;
     const rotation = /\brotation\s+([0-3])\b/.exec(line);
-    return { width, height, rotation: rotation ? Number(rotation[1]) : undefined, source: "display-info" };
+    if (!real || !rotation || !validDimension(Number(real[1])) || !validDimension(Number(real[2]))) return undefined;
+    return { width: Number(real[1]), height: Number(real[2]), rotation: Number(rotation[1]), source: "display-info" };
+  };
+  const agree = (values: Geometry[]): Geometry | undefined => {
+    const first = values[0];
+    return first && values.every(value => value.width === first.width && value.height === first.height && value.rotation === first.rotation)
+      ? first : undefined;
+  };
+  for (const section of defaultSections) {
+    for (const line of section.split(/\r?\n/).filter(line => line.includes("DisplayFrames"))) {
+      const frames = /DisplayFrames[^\n]*?\bw=(\d+)\s+h=(\d+)\s+r=([0-3])\b/.exec(line);
+      if (frames && validDimension(Number(frames[1])) && validDimension(Number(frames[2]))) {
+        current.push({ width: Number(frames[1]), height: Number(frames[2]), rotation: Number(frames[3]), source: "display-frames" });
+      } else invalidCurrent = true;
+    }
   }
-  const defaultSection = /Display:\s*mDisplayId=0\b([\s\S]*?)(?=\n\s*Display:\s*mDisplayId=|\s*$)/.exec(window)?.[1] ?? window;
-  const frames = /DisplayFrames[^\n]*?\bw=(\d+)\s+h=(\d+)\s+r=([0-3])\b/.exec(defaultSection);
-  if (frames && validDimension(Number(frames[1])) && validDimension(Number(frames[2]))) {
-    return { width: Number(frames[1]), height: Number(frames[2]), rotation: Number(frames[3]), source: "display-frames" };
+  // Base info describes the natural display and must not win over a window-manager override.
+  let ambiguousOverride = false;
+  for (const line of (display + "\n" + defaultSections.join("\n")).split(/\r?\n/)) {
+    const field = /^\s*(mDisplayInfo|mOverrideDisplayInfo)\s*=\s*(.*)$/.exec(line);
+    if (!field || field[2]!.trim() === "null") continue;
+    const id = /\bdisplayId\s+(\d+)\b/.exec(field[2]!);
+    if (field[1] === "mOverrideDisplayInfo" && !id) ambiguousOverride = true;
+    if (id?.[1] !== "0") continue;
+    const value = readInfo(field[2]!);
+    if (value) current.push(value);
+    else invalidCurrent = true;
   }
+  // Configuration objects contain embedded mRotation values (including undefined).
+  // Only the standalone runtime field in the scoped default display is authoritative.
+  const rawRotations = defaultSections.flatMap(section =>
+    [...section.matchAll(/^[ \t]*mRotation=(\S*)/gm)].map(match => match[1]!));
+  if (rawRotations.some(value => !/^(?:ROTATION_)?(?:0|90|180|270|1|2|3)$/.test(value))) return undefined;
+  const rotations = rawRotations.map(value => Number(value.replace(/^ROTATION_/, "")))
+    .map(value => value > 3 ? value / 90 : value);
+  const rotation = rotations[0];
+  if (invalidCurrent || rotations.some(value => value !== rotation)) return undefined;
+  if (current.length) {
+    const value = agree(current);
+    return value && (rotation === undefined || value.rotation === rotation) ? value : undefined;
+  }
+  // Never hide a malformed effective record by substituting physical/base dimensions.
+  if (ambiguousOverride) return undefined;
   const dimensions = /Override size:\s*(\d+)x(\d+)/.exec(size) ?? /Physical size:\s*(\d+)x(\d+)/.exec(size);
-  const rotation = /\bmRotation=(?:ROTATION_)?(0|90|180|270|1|2|3)\b/.exec(window);
-  if (!dimensions || !rotation) return undefined;
-  const raw = Number(rotation[1]);
-  const turn = raw > 3 ? raw / 90 : raw;
-  let width = Number(dimensions[1]), height = Number(dimensions[2]);
-  if (!validDimension(width) || !validDimension(height)) return undefined;
-  if (turn % 2) [width, height] = [height, width];
-  return { width, height, rotation: turn, source: "wm-size" };
+  if (dimensions && rotation !== undefined) {
+    let width = Number(dimensions[1]), height = Number(dimensions[2]);
+    if (!validDimension(width) || !validDimension(height)) return undefined;
+    if (rotation % 2) [width, height] = [height, width];
+    return { width, height, rotation, source: "wm-size" };
+  }
+  // Base-only fallback needs a complete, explicitly default LogicalDisplay block
+  // whose override is null; a missing/unparseable override is not evidence of null.
+  const lines = display.split(/\r?\n/);
+  const bases: Geometry[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    const header = /^([ \t]*)Display 0:[^\n]*$/.exec(lines[index]!);
+    if (!header) continue;
+    let end = index + 1;
+    while (end < lines.length && (!lines[end]!.trim() || /^[ \t]*/.exec(lines[end]!)![0].length > header[1]!.length)) end++;
+    const section = lines.slice(index + 1, end).join("\n");
+    if (!/^\s*mDisplayId=0\s*$/m.test(section) || !/^\s*mOverrideDisplayInfo\s*=\s*null\s*$/m.test(section)) continue;
+    for (const line of section.split("\n")) {
+      if (!/^\s*mBaseDisplayInfo\s*=\s*DisplayInfo\{/.test(line) || !/\bdisplayId\s+0\b/.test(line)) continue;
+      const value = readInfo(line);
+      if (value) bases.push(value);
+    }
+  }
+  const base = agree(bases);
+  return base && (rotation === undefined || base.rotation === rotation) ? base : undefined;
 }
 
 export function parseAndroidApp(window: string): { id: string; title?: string } | undefined {
   const focused = /mCurrentFocus=Window\{[^\n]*?\bu\d+\s+([A-Za-z0-9_.$]+\/[A-Za-z0-9_.$]+)/.exec(window)
     ?? /mFocusedApp=[^\n]*?\bu\d+\s+([A-Za-z0-9_.$]+\/[A-Za-z0-9_.$]+)/.exec(window);
   return focused ? { id: focused[1]!, title: focused[1]!.split("/")[0] } : undefined;
+}
+
+/** Normalize Android's short and full ComponentName spellings without changing the target. */
+export function normalizeAndroidAppId(id: string | undefined): string | undefined {
+  const match = /^([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)\/([A-Za-z0-9_.$]+)$/.exec(id ?? "");
+  if (!match) return undefined;
+  const packageName = match[1]!, activity = match[2]!;
+  return packageName + "/" + (activity.startsWith(".") ? packageName + activity : activity);
+}
+function requiredAndroidAppId(id: string | undefined): string {
+  const normalized = normalizeAndroidAppId(id);
+  if (!normalized) throw new ComputerError("android_focus_unknown",
+    "A verified screenshot application is required before Android input.", { phase: "preflight", mayHaveApplied: false });
+  return normalized;
+}
+
+// These commands run inside the final bounded su shell, not in a separate su session.
+// Default-display scope is explicit; unknown, conflicting, and duplicate records never pass.
+const ANDROID_FOCUS_SHELL = [
+  "relay_focus_snapshot() {",
+  "  relay_focus_reason=unknown",
+  "  relay_focus_dump=$(/system/bin/dumpsys window displays) || return 1",
+  "  relay_focus_records=$(",
+  "    relay_focus_scope=0",
+  "    printf '%s\\n' \"$relay_focus_dump\" | while IFS= read -r relay_focus_line; do",
+  "      relay_focus_line=${relay_focus_line#\"${relay_focus_line%%[![:space:]]*}\"}",
+  "      case \"$relay_focus_line\" in",
+  "        Display:*)",
+  "          relay_focus_scope=0",
+  "          case \"$relay_focus_line\" in",
+  "            \"Display: mDisplayId=\"*)",
+  "              relay_focus_tail=${relay_focus_line#\"Display: mDisplayId=\"}",
+  "              relay_focus_id=${relay_focus_tail%%[!0-9]*}",
+  "              relay_focus_tail=${relay_focus_tail#\"$relay_focus_id\"}",
+  "              case \"$relay_focus_tail\" in \"\"|[[:space:]]*|\"(\"*) ;; *) relay_focus_id=invalid ;; esac",
+  "              if [ \"$relay_focus_id\" = 0 ]; then relay_focus_scope=1; printf 'default\\n'; fi",
+  "              ;;",
+  "          esac",
+  "          ;;",
+  "        \"WINDOW MANAGER \"*) relay_focus_scope=0 ;;",
+  "        mCurrentFocus=*|mFocusedApp=*)",
+  "          if [ \"$relay_focus_scope\" = 1 ]; then",
+  "            case \"$relay_focus_line\" in mCurrentFocus=*) relay_focus_kind=current ;; *) relay_focus_kind=app ;; esac",
+  "            relay_focus_component=$(printf '%s\\n' \"$relay_focus_line\" | /system/bin/sed -n 's/^[^=]*=.*[[:space:]]u[0-9][0-9]*[[:space:]][[:space:]]*\\([A-Za-z0-9_.$][A-Za-z0-9_.$]*\\/[A-Za-z0-9_.$][A-Za-z0-9_.$]*\\)[[:space:]}].*$/\\1/p') || relay_focus_component=",
+  "            if [ -z \"$relay_focus_component\" ]; then",
+  "              printf '%s=unknown\\n' \"$relay_focus_kind\"",
+  "            else",
+  "              relay_focus_package=${relay_focus_component%%/*}",
+  "              relay_focus_activity=${relay_focus_component#*/}",
+  "              case \"$relay_focus_activity\" in .*) relay_focus_activity=\"$relay_focus_package$relay_focus_activity\" ;; esac",
+  "              printf '%s=%s/%s\\n' \"$relay_focus_kind\" \"$relay_focus_package\" \"$relay_focus_activity\"",
+  "            fi",
+  "          fi",
+  "          ;;",
+  "      esac",
+  "    done",
+  "  ) || return 1",
+  "  relay_focus_defaults=0",
+  "  relay_focus_current=",
+  "  relay_focus_app=",
+  "  relay_focus_valid=1",
+  "  for relay_focus_record in $relay_focus_records; do",
+  "    case \"$relay_focus_record\" in",
+  "      default) relay_focus_defaults=$((relay_focus_defaults + 1)) ;;",
+  "      current=*)",
+  "        if [ -n \"$relay_focus_current\" ]; then relay_focus_valid=0; fi",
+  "        relay_focus_current=${relay_focus_record#current=}",
+  "        ;;",
+  "      app=*)",
+  "        if [ -n \"$relay_focus_app\" ]; then relay_focus_valid=0; fi",
+  "        relay_focus_app=${relay_focus_record#app=}",
+  "        ;;",
+  "      *) relay_focus_valid=0 ;;",
+  "    esac",
+  "  done",
+  "  if [ \"$relay_focus_valid\" != 1 ] || [ \"$relay_focus_defaults\" != 1 ] ||",
+  "     [ \"$relay_focus_current\" = unknown ] || [ \"$relay_focus_app\" = unknown ] ||",
+  "     { [ -z \"$relay_focus_current\" ] && [ -z \"$relay_focus_app\" ]; }; then return 1; fi",
+  "  if [ -n \"$relay_focus_current\" ] && [ -n \"$relay_focus_app\" ] &&",
+  "     [ \"$relay_focus_current\" != \"$relay_focus_app\" ]; then return 1; fi",
+  "  relay_focus_observed=${relay_focus_current:-$relay_focus_app}",
+  "  if [ \"$relay_focus_observed\" = \"$relay_focus_expected\" ]; then relay_focus_reason=matched; return 0; fi",
+  "  relay_focus_reason=changed",
+  "  return 1",
+  "}",
+  "relay_focus_wait() {",
+  "  relay_focus_attempt=0",
+  "  relay_focus_consecutive=0",
+  "  while [ \"$relay_focus_attempt\" -lt 4 ]; do",
+  "    relay_focus_attempt=$((relay_focus_attempt + 1))",
+  "    if relay_focus_snapshot; then",
+  "      relay_focus_consecutive=$((relay_focus_consecutive + 1))",
+  "      if [ \"$relay_focus_consecutive\" -ge 2 ]; then return 0; fi",
+  "    else relay_focus_consecutive=0; fi",
+  "  done",
+  "  if [ \"$relay_focus_reason\" = matched ]; then relay_focus_reason=unknown; fi",
+  "  return 1",
+  "}"
+].join("\n");
+
+export function androidFocusGuardScript(expectedAppId: string, request: string): string {
+  const expected = requiredAndroidAppId(expectedAppId);
+  if (!/^[a-f0-9]{32}$/.test(request)) throw new Error("Invalid internal focus request.");
+  return "relay_focus_expected=" + quote(expected) + "\n" + ANDROID_FOCUS_SHELL + "\n"
+    + "if ! relay_focus_wait; then\n"
+    + "  printf '\\n__RELAY_ANDROID_FOCUS_BLOCKED__" + request + ":preflight:%s\\n' \"$relay_focus_reason\"\n"
+    + "  exit 73\nfi\n";
+}
+export function androidFocusRecheckScript(request: string): string {
+  if (!/^[a-f0-9]{32}$/.test(request)) throw new Error("Invalid internal focus request.");
+  return "if ! relay_focus_snapshot; then\n"
+    + "  printf '\\n__RELAY_ANDROID_FOCUS_BLOCKED__" + request + ":input_method:%s\\n' \"$relay_focus_reason\"\n"
+    + "  exit 74\nfi\n";
+}
+export function parseAndroidFocusFailure(output: string, request: string, exitCode: number):
+  { phase: "preflight" | "input_method"; reason: "unknown" | "changed" } | undefined {
+  if (!/^[a-f0-9]{32}$/.test(request) || (exitCode !== 73 && exitCode !== 74)) return undefined;
+  const records = [...output.matchAll(new RegExp("^__RELAY_ANDROID_FOCUS_BLOCKED__" + request
+    + ":(preflight|input_method):(unknown|changed)\\r?$", "gm"))];
+  if (records.length !== 1 || (records[0]![1] === "preflight" ? 73 : 74) !== exitCode) return undefined;
+  return { phase: records[0]![1] as "preflight" | "input_method", reason: records[0]![2] as "unknown" | "changed" };
+}
+const ANDROID_COMMIT_STATUSES: Record<number, string> = {
+  [-1]: "ok", 10: "invalid_request", 11: "invalid_payload", 12: "invalid_utf8", 13: "request_id_reused",
+  20: "no_input_connection", 21: "focus_changed", 22: "commit_rejected", 23: "commit_exception"
+};
+/** Only this exact nonce and the bundled bridge's fixed code/status pairs are exposed. */
+export function parseAndroidCommitAcknowledgement(output: string, request: string):
+  { resultCode: number; status: string } | undefined {
+  if (!/^[a-f0-9]{32}$/.test(request) || output.length > 64 * 1024) return undefined;
+  const records = [...output.matchAll(/^Broadcast completed: result=(-?\d{1,3}), data="relay-input:([a-f0-9]{32}):([a-z_]{1,32})"[ \t]*\r?$/gm)]
+    .filter(match => match[2] === request);
+  if (records.length !== 1) return undefined;
+  const resultCode = Number(records[0]![1]), status = records[0]![3]!;
+  return ANDROID_COMMIT_STATUSES[resultCode] === status ? { resultCode, status } : undefined;
 }
 
 export function parseAndroidLock(policy: string, power: string): { locked?: boolean; interactive?: boolean; evidence: string[] } {
@@ -133,6 +322,19 @@ export function parseAndroidLock(policy: string, power: string): { locked?: bool
     interactive, evidence };
 }
 
+/** Return only bounded package-manager codes/static classes, never native output or paths. */
+export function parseAndroidInstallFailure(stdout: string, stderr: string): Record<string, string> {
+  const output = stdout + "\n" + stderr;
+  const code = /\b(INSTALL_(?:FAILED|PARSE_FAILED)_[A-Z0-9_]{1,80})\b/.exec(output)?.[1];
+  if (code) return { packageManagerCode: code };
+  if (/\bSecurityException\b/.test(output)) return { packageManagerCategory: "package_manager_security_exception" };
+  if (/\bUnknown option\b/i.test(output)) return { packageManagerCategory: "unsupported_install_option" };
+  if (/Can't find service:\s*package\b|\bpackage (?:manager|service) (?:is )?unavailable\b/i.test(output)) {
+    return { packageManagerCategory: "package_service_unavailable" };
+  }
+  return {};
+}
+
 function parseProbe(text: string): Probe {
   const part = sections(text);
   const integer = (value: string | undefined) => {
@@ -155,7 +357,7 @@ function parseProbe(text: string): Probe {
   };
 }
 
-function probeScript(): string {
+function probeScript(expectedAppId?: string, focusRequest?: string): string {
   const marker = (name: string) => "printf '\\n__RELAY_ANDROID_" + name + "__\\n'";
   return [
     "export PATH=/system/bin:/system/xbin:/vendor/bin",
@@ -178,7 +380,8 @@ function probeScript(): string {
     'relay_android_apk=$(/system/bin/pm path --user "$relay_android_user" ' + ANDROID_INPUT_PACKAGE + " | /system/bin/sed -n 's/^package://p' | /system/bin/head -n 1)",
     'if [ -n "$relay_android_apk" ]; then ' + TOYBOX + ' sha256sum "$relay_android_apk"; fi',
     ""
-  ].join("\n");
+  ].join("\n") + (expectedAppId ? "\n" + androidFocusGuardScript(expectedAppId, focusRequest!)
+    + "\nprintf '\\n__RELAY_ANDROID_bound_app__\\n'\nprintf '%s\\n' " + quote(requiredAndroidAppId(expectedAppId)) + "\n" : "");
 }
 
 const KEYS: Record<string, string> = {
@@ -217,7 +420,7 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
   /** Root has its own watchdog. A dead Termux su client does not prove root work ended. */
   const rootCommand = async (
     command: string, context: NativeContext,
-    options: { input?: string | Buffer; mutates?: boolean; outputLimit?: number; cleanupSeconds?: number; watchdog?: boolean } = {}
+    options: { input?: string | Buffer; mutates?: boolean; packageInstall?: boolean; focusRequest?: string; outputLimit?: number; cleanupSeconds?: number; watchdog?: boolean } = {}
   ): Promise<NativeResult> => {
     if (context.signal?.aborted) throw new ComputerError("cancelled", "Android action was cancelled before execution.", { mayHaveApplied: false });
     const cleanupSeconds = options.cleanupSeconds ?? 2;
@@ -233,9 +436,15 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
         maxOutputBytes: options.outputLimit ?? 2 * 1024 * 1024
       }, { ...context, timeoutMs: Math.min(120000, Math.max(context.timeoutMs, (seconds + cleanupSeconds + 1) * 1000)) });
       if (result.exitCode !== 0) {
+        const focus = options.focusRequest
+          ? parseAndroidFocusFailure(result.stdout.toString("utf8"), options.focusRequest, result.exitCode) : undefined;
+        if (focus) throw new ComputerError(focus.reason === "changed" ? "focus_changed" : "android_focus_unknown",
+          "The screenshot application could not be confirmed in the Android input session; observe it again before acting.",
+          { phase: focus.phase, focusReason: focus.reason, mayHaveApplied: focus.phase !== "preflight" });
         throw new ComputerError(result.exitCode === 124 || result.exitCode === 137 ? "android_root_timeout" : "android_command_failed",
           "The Android root command did not complete successfully.",
-          { exitCode: result.exitCode, mayHaveApplied: Boolean(options.mutates) });
+          { exitCode: result.exitCode, mayHaveApplied: Boolean(options.mutates),
+            ...(options.packageInstall ? parseAndroidInstallFailure(result.stdout.toString("utf8"), result.stderr.toString("utf8")) : {}) });
       }
       return result;
     } catch (error) {
@@ -253,8 +462,18 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
 
   const probe = async (context: NativeContext): Promise<Probe> => {
     // Capability detection is read-only and also bounded inside the root process.
-    const result = await rootCommand(SHELL + " -s", context, { input: probeScript() });
-    const value = parseProbe(result.stdout.toString("utf8"));
+    const expected = context.expectedAppId === undefined ? undefined : requiredAndroidAppId(context.expectedAppId);
+    const focusRequest = expected ? randomBytes(16).toString("hex") : undefined;
+    const result = await rootCommand(SHELL + " -s", context, { input: probeScript(expected, focusRequest), focusRequest });
+    const output = result.stdout.toString("utf8");
+    const value = parseProbe(output);
+    if (expected) {
+      if (sections(output).bound_app !== expected) throw new ComputerError("android_focus_unknown",
+        "The root session did not confirm the screenshot application.", { phase: "preflight", mayHaveApplied: false });
+      // Only the successful same-root, default-display observation authorizes this bound identity.
+      // Keep the caller's short/full spelling so the coordinator's frame identity remains unchanged.
+      value.app = { id: context.expectedAppId!, title: expected.split("/")[0] };
+    }
     if (value.uid !== 0) throw new ComputerError("su_denied", "Existing su permission did not provide root access; no permission dialog was accepted.");
     if (value.user < 0 || value.sdk < 23) throw new ComputerError("android_unsupported", "Could not identify an Android 6+ foreground user.");
     return value;
@@ -331,17 +550,18 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
     if (bytes.length > MAX_TEXT_BYTES) throw new ComputerError("text_too_large", "Android text input is limited to 65536 UTF-8 bytes per action.");
     if (bytes.length === 0) return { applied: false, utf8Bytes: 0, reason: "empty text" };
     if (!value.selectedIme) throw new ComputerError("android_original_ime_unknown", "The current input method could not be saved; no input method was changed.");
-    const expectedPackage = value.app?.id.split("/")[0];
-    if (!expectedPackage || !/^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+$/.test(expectedPackage)) {
-      throw new ComputerError("android_focus_unknown", "The focused Android app could not be identified; focus an editable field before typing.");
-    }
+    const expectedAppId = requiredAndroidAppId(context.expectedAppId);
+    if (normalizeAndroidAppId(value.app?.id) !== expectedAppId) throw new ComputerError("focus_changed",
+      "The observed Android application differs from the screenshot target.", { phase: "preflight", mayHaveApplied: false });
+    const expectedPackage = expectedAppId.split("/")[0]!;
     const request = randomBytes(16).toString("hex");
     const payload = bytes.toString("base64");
     const restore = restoreScript(value, request);
     const script = [
-      "export PATH=/system/bin:/system/xbin:/vendor/bin", "set -u", restore,
+      "export PATH=/system/bin:/system/xbin:/vendor/bin", "set -u", androidFocusGuardScript(expectedAppId, request), restore,
       "/system/bin/ime enable --user " + value.user + " " + quote(ANDROID_INPUT_METHOD) + " >/dev/null || exit 71",
       "/system/bin/ime set --user " + value.user + " " + quote(ANDROID_INPUT_METHOD) + " >/dev/null || exit 72",
+      androidFocusRecheckScript(request),
       ["/system/bin/am", "broadcast", "--user", String(value.user), "--receiver-foreground", "-n", RECEIVER,
         "-a", ANDROID_INPUT_PACKAGE + ".COMMIT", "--es", "request_id", request, "--es", "expected_package", expectedPackage,
         "--es", "payload_b64", payload].map(quote).join(" "),
@@ -351,16 +571,20 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
     let failure: unknown;
     try {
       const result = await rootCommand(SHELL + " -s", context, {
-        input: script, mutates: true, cleanupSeconds: 6, outputLimit: 64 * 1024
+        input: script, mutates: true, focusRequest: request, cleanupSeconds: 6, outputLimit: 64 * 1024
       });
       output = result.stdout.toString("utf8");
-      const ack = new RegExp('Broadcast completed: result=-1, data="relay-input:' + request + ':ok"');
-      if (!ack.test(output)) {
-        throw new ComputerError("android_text_unconfirmed", "The input bridge did not acknowledge this exact commit; text will not be replayed.", { mayHaveApplied: true, requestId: request });
+      const ack = parseAndroidCommitAcknowledgement(output, request);
+      if (!ack || ack.resultCode !== -1) {
+        throw new ComputerError("android_text_unconfirmed", "The input bridge did not acknowledge this exact commit; text will not be replayed.", {
+          mayHaveApplied: true, requestId: request, bridgeAcknowledgement: ack ? "matched" : "missing_or_invalid",
+          ...(ack ? { bridgeResultCode: ack.resultCode, bridgeStatus: ack.status } : {})
+        });
       }
     } catch (error) { failure = error; }
     finally {
-      if (!output.includes("__RELAY_IME_RESTORED__" + request + ":1") && !output.includes("__RELAY_IME_RESTORED__" + request + ":2")) {
+      const untouched = failure instanceof ComputerError && failure.details?.mayHaveApplied === false;
+      if (!untouched && !output.includes("__RELAY_IME_RESTORED__" + request + ":1") && !output.includes("__RELAY_IME_RESTORED__" + request + ":2")) {
         // This cleanup is independent of the cancelled caller and runs only after
         // the previous root command's bounded execution window has elapsed.
         try {
@@ -375,6 +599,7 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
         }
       }
     }
+    if (failure instanceof ComputerError && failure.details?.mayHaveApplied === false) throw failure;
     if (!output.includes("__RELAY_IME_RESTORED__" + request + ":1") && !output.includes("__RELAY_IME_RESTORED__" + request + ":2")) {
       throw new ComputerError("android_ime_restore_unconfirmed", "The original input-method state could not be confirmed restored.",
         { mayHaveApplied: true, originalInputMethod: value.selectedIme, requestId: request });
@@ -432,25 +657,43 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
       return capture(await probe(context), context);
     },
     async setup(context) {
-      const value = await probe(context);
-      requireActions(value);
-      if (bridgeInstalled(value)) return { installed: true, changed: false, package: ANDROID_INPUT_PACKAGE, version: bridge.version, sha256: bridge.sha256 };
-      if (!bridgeBundled()) throw new ComputerError("android_bridge_not_bundled", "This build does not contain a signed Android input bridge.");
-      const apk = Buffer.from(bridge.base64, "base64");
-      if (apk.length < 1000 || apk.length > 2 * 1024 * 1024 || createHash("sha256").update(apk).digest("hex") !== bridge.sha256) {
-        throw new ComputerError("android_bridge_integrity_failed", "The bundled Android input bridge failed integrity verification.");
+      let phase: "preflight" | "install" | "verification" = "preflight";
+      try {
+        const value = await probe(context);
+        requireActions(value);
+        if (bridgeInstalled(value)) return { installed: true, changed: false, package: ANDROID_INPUT_PACKAGE, version: bridge.version, sha256: bridge.sha256 };
+        if (!bridgeBundled()) throw new ComputerError("android_bridge_not_bundled", "This build does not contain a signed Android input bridge.");
+        const apk = Buffer.from(bridge.base64, "base64");
+        if (apk.length < 1000 || apk.length > 2 * 1024 * 1024 || createHash("sha256").update(apk).digest("hex") !== bridge.sha256) {
+          throw new ComputerError("android_bridge_integrity_failed", "The bundled Android input bridge failed integrity verification.");
+        }
+        // End option parsing before the stdin operand: Android treats a bare "-" as an option.
+        const command = ["/system/bin/pm", "install", "-r", "--user", String(value.user), "-S", String(apk.length), "--", "-"].map(quote).join(" ");
+        phase = "install";
+        const result = await rootCommand(command, context, { input: apk, mutates: true, packageInstall: true, outputLimit: 64 * 1024, cleanupSeconds: 3 });
+        if (!/^Success\s*$/m.test(result.stdout.toString("utf8"))) {
+          throw new ComputerError("android_bridge_install_unconfirmed", "Android did not confirm installation of the input bridge.", {
+            mayHaveApplied: true, ...parseAndroidInstallFailure(result.stdout.toString("utf8"), result.stderr.toString("utf8"))
+          });
+        }
+        phase = "verification";
+        const verified = await probe(context);
+        if (!bridgeInstalled(verified)) throw new ComputerError("android_bridge_install_unconfirmed", "The installed bridge APK did not match the bundled SHA256.", { mayHaveApplied: true });
+        return { installed: true, changed: true, package: ANDROID_INPUT_PACKAGE, version: bridge.version, sha256: bridge.sha256, inputMethodChanged: verified.selectedIme !== value.selectedIme };
+      } catch (error) {
+        const known = error instanceof ComputerError ? error : undefined;
+        // Read-only verification cannot erase a preceding installation.
+        // During install, retain an explicit pre-spawn/cancellation guarantee of no mutation.
+        const mayHaveApplied = phase === "verification"
+          || (phase === "install" && known?.details?.mayHaveApplied !== false);
+        throw new ComputerError(known?.code ?? "android_setup_failed",
+          known?.message ?? "Android input bridge setup did not complete successfully.",
+          { ...known?.details, phase, mayHaveApplied });
       }
-      const command = ["/system/bin/pm", "install", "-r", "--user", String(value.user), "-S", String(apk.length), "-"].map(quote).join(" ");
-      const result = await rootCommand(command, context, { input: apk, mutates: true, outputLimit: 64 * 1024, cleanupSeconds: 3 });
-      if (!/^Success\s*$/m.test(result.stdout.toString("utf8"))) {
-        throw new ComputerError("android_bridge_install_unconfirmed", "Android did not confirm installation of the input bridge.", { mayHaveApplied: true });
-      }
-      const verified = await probe(context);
-      if (!bridgeInstalled(verified)) throw new ComputerError("android_bridge_install_unconfirmed", "The installed bridge APK did not match the bundled SHA256.", { mayHaveApplied: true });
-      return { installed: true, changed: true, package: ANDROID_INPUT_PACKAGE, version: bridge.version, sha256: bridge.sha256, inputMethodChanged: verified.selectedIme !== value.selectedIme };
     },
     async act(action: ComputerAction, display: ComputerDisplay, context: NativeContext): Promise<Record<string, unknown>> {
       if (action.type === "move") throw new ComputerError("unsupported_action", "Android touch input has no hover pointer.");
+      const expectedAppId = requiredAndroidAppId(context.expectedAppId);
       if (action.type === "text") {
         const operation = textTail.catch(() => {}).then(async () => {
           if (context.signal?.aborted) throw new ComputerError("cancelled", "Text input was cancelled before the input-method session.", { mayHaveApplied: false });
@@ -478,8 +721,10 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
           if (!Number.isInteger(clicks) || clicks < 1 || clicks > 3) throw new ComputerError("invalid_clicks", "Android supports one to three taps per action.");
           const position = point(display, action.x, action.y);
           const command = ["/system/bin/input", "tap", String(position.x), String(position.y)].map(quote).join(" ");
-          const script = Array.from({ length: clicks }, () => command + " || exit $?").join("\n") + "\n";
-          await rootCommand(SHELL + " -s", context, { input: script, mutates: true, outputLimit: 16 * 1024 });
+          const focusRequest = randomBytes(16).toString("hex");
+          const script = androidFocusGuardScript(expectedAppId, focusRequest)
+            + Array.from({ length: clicks }, () => command + " || exit $?").join("\n") + "\n";
+          await rootCommand(SHELL + " -s", context, { input: script, mutates: true, focusRequest, outputLimit: 16 * 1024 });
           return { applied: true, gesture: "tap", taps: clicks };
         }
         if (action.type === "drag") {
@@ -491,11 +736,13 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
           finalTouch = to;
           args = ["/system/bin/input", "swipe", String(from.x), String(from.y), String(to.x), String(to.y), String(Math.round(duration))];
         } else {
-          const amount = action.amount ?? 400;
-          if (!Number.isFinite(amount) || amount <= 0) throw new ComputerError("invalid_scroll", "Android scroll amount must be positive.");
+          const steps = action.amount === undefined ? 3 : action.amount;
+          if (!Number.isInteger(steps) || steps < 1 || steps > 40) {
+            throw new ComputerError("invalid_scroll", "Android scroll amount must be an integer from 1 to 40 steps.");
+          }
           const horizontal = action.direction === "left" || action.direction === "right";
           const axisSize = horizontal ? display.width : display.height;
-          const distance = Math.min(amount, axisSize * 0.75);
+          const distance = Math.min(steps * 120, axisSize * 0.75);
           let cx = action.x ?? display.width / 2, cy = action.y ?? display.height / 2;
           point(display, cx, cy);
           if (horizontal) cx = Math.min(display.width - 1 - distance / 2, Math.max(distance / 2, cx));
@@ -510,7 +757,8 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
       const command = args.map(quote).join(" ");
       // input itself emits matching DOWN/UP events. A timeout is never treated as success.
       // Only this touch gesture's endpoint is eligible for emergency release.
-      let script = "export PATH=/system/bin:/system/xbin:/vendor/bin\n";
+      const focusRequest = randomBytes(16).toString("hex");
+      let script = "export PATH=/system/bin:/system/xbin:/vendor/bin\n" + androidFocusGuardScript(expectedAppId, focusRequest);
       if (finalTouch && value.inputHelp.includes("motionevent")) {
         script += "relay_touch_started=0\ntrap 'if [ \"$relay_touch_started\" = 1 ]; then " + TOYBOX
           + " timeout -k 1 2 /system/bin/input motionevent UP " + finalTouch.x + " " + finalTouch.y + " >/dev/null 2>&1; fi' EXIT\n";
@@ -519,7 +767,7 @@ export function createAndroidBackend(runtime: AndroidBackendRuntime = {}): Compu
       script += command + "\nrelay_input_exit=$?\n";
       if (finalTouch) script += "if [ \"$relay_input_exit\" = 0 ]; then relay_touch_started=0; fi\n";
       script += "exit \"$relay_input_exit\"\n";
-      await rootCommand(SHELL + " -s", context, { input: script, mutates: true, outputLimit: 16 * 1024, cleanupSeconds: 3 });
+      await rootCommand(SHELL + " -s", context, { input: script, mutates: true, focusRequest, outputLimit: 16 * 1024, cleanupSeconds: 3 });
       return { applied: true, gesture: action.type === "key" ? "key" : "swipe" };
     }
   };

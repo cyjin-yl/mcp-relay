@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
-  ANDROID_INPUT_METHOD, createAndroidBackend, parseAndroidGeometry, parseAndroidApp, parseAndroidLock, androidKeyCode
+  ANDROID_INPUT_METHOD, createAndroidBackend, parseAndroidGeometry, parseAndroidApp, parseAndroidLock, androidKeyCode, parseAndroidInstallFailure,
+  normalizeAndroidAppId, parseAndroidCommitAcknowledgement
 } from "../src/computer/android.js";
 import { ComputerError, type NativeCommand, type NativeContext, type NativeResult } from "../src/computer/types.js";
 
 const artifact = Buffer.alloc(1400, 90);
 const bridge = { version: "0.1.0", versionCode: 1, sha256: createHash("sha256").update(artifact).digest("hex"), base64: artifact.toString("base64") };
-const context: NativeContext = { timeoutMs: 30000 };
+const context: NativeContext = { timeoutMs: 30000, expectedAppId: "dev.cyjin.mcprelay.input/.ProbeActivity" };
 const display = { id: "0", x: 0, y: 0, width: 1200, height: 2000, scaleX: 1, scaleY: 1, rotation: 0 };
 const ok = (stdout = "", exitCode = 0): NativeResult => ({ stdout: Buffer.from(stdout), stderr: Buffer.alloc(0), exitCode });
 
@@ -37,9 +39,11 @@ function requestId(spec: NativeCommand): string {
 function fixture(options: {
   installed?: boolean; combo?: boolean; real?: string; rotation?: number; policy?: string; power?: string;
   act?: (spec: NativeCommand, index: number) => Promise<NativeResult> | NativeResult;
+  probe?: (spec: NativeCommand, index: number) => Promise<NativeResult> | NativeResult;
+  install?: (spec: NativeCommand) => Promise<NativeResult> | NativeResult;
 } = {}) {
   const calls: NativeCommand[] = [];
-  let installed = options.installed ?? true, clock = 0, actionIndex = 0;
+  let installed = options.installed ?? true, clock = 0, actionIndex = 0, probeIndex = 0;
   const waits: number[] = [];
   const backend = createAndroidBackend({
     find: () => "/system/xbin/su", bridge, now: () => clock,
@@ -47,11 +51,21 @@ function fixture(options: {
     run: async spec => {
       calls.push(spec);
       if (typeof spec.input === "string" && spec.input.includes("__RELAY_ANDROID_uid__")) {
-        return ok(probe(installed, options.combo, options.real, options.rotation, undefined, options.policy, options.power));
+        const result = options.probe ? await options.probe(spec, probeIndex++)
+          : ok(probe(installed, options.combo, options.real, options.rotation, undefined, options.policy, options.power));
+        const expected = /relay_focus_expected='([^']+)'/.exec(spec.input)?.[1];
+        if (!expected || result.exitCode !== 0) return result;
+        const observed = normalizeAndroidAppId(parseAndroidApp(result.stdout.toString("utf8"))?.id);
+        if (observed !== expected) {
+          const request = /__RELAY_ANDROID_FOCUS_BLOCKED__([a-f0-9]{32}):preflight/.exec(spec.input)![1];
+          return ok("__RELAY_ANDROID_FOCUS_BLOCKED__" + request + ":preflight:" + (observed ? "changed" : "unknown") + "\n", 73);
+        }
+        return ok(result.stdout.toString("utf8") + "\n__RELAY_ANDROID_bound_app__\n" + observed + "\n");
       }
       if (spec.args[1]?.includes("/system/bin/screencap -p")) return { stdout: png(), stderr: Buffer.alloc(0), exitCode: 0 };
       if (Buffer.isBuffer(spec.input)) {
         expect(spec.input.equals(artifact)).toBe(true);
+        if (options.install) return options.install(spec);
         installed = true;
         return ok("Success\n");
       }
@@ -66,16 +80,78 @@ function fixture(options: {
   return { backend, calls, waits };
 }
 
+function scrollCommands(calls: NativeCommand[]): string[][] {
+  return calls.flatMap(call => String(call.input).split("\n")
+    .filter(line => line.startsWith("'/system/bin/input' 'swipe' "))
+    .map(line => [...line.matchAll(/'([^']*)'/g)].map(match => match[1]!)));
+}
+
 describe("Android display and input metadata", () => {
-  it("takes the primary real display dimensions and rotation", () => {
-    const text = 'DisplayInfo{"External", displayId 2, real 900 x 600, rotation 0}\n'
+  it("takes explicitly identified current default display information", () => {
+    const text = 'mDisplayInfo=DisplayInfo{"External", displayId 2, real 900 x 600, rotation 0}\n'
       + 'mDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 2000 x 1200, rotation 1}';
     expect(parseAndroidGeometry(text, "", "")).toEqual({ width: 2000, height: 1200, rotation: 1, source: "display-info" });
   });
-  it("uses the rotated wm override only with an observed rotation", () => {
-    expect(parseAndroidGeometry("", "mRotation=ROTATION_90", "Physical size: 1200x2000\nOverride size: 600x1000"))
+  it("uses the observed landscape override and default frames instead of the natural base", () => {
+    const base = 'mBaseDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 1840 x 2944, rotation 0}';
+    const override = 'mOverrideDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 2944 x 1840, rotation 1}';
+    const window = "Display: mDisplayId=0\n  DisplayFrames w=2944 h=1840 r=1\n  mRotation=1";
+    expect(parseAndroidGeometry(base + "\n" + override, window, "Physical size: 1840x2944"))
+      .toEqual({ width: 2944, height: 1840, rotation: 1, source: "display-frames" });
+    expect(parseAndroidGeometry(base + "\n" + override + "\n" + override, "", ""))
+      .toEqual({ width: 2944, height: 1840, rotation: 1, source: "display-info" });
+  });
+  it("ignores embedded Configuration rotations in a sanitized real default-display dump", () => {
+    const captured: { display: string; window: string; size: string } =
+      JSON.parse(readFileSync(new URL("./fixtures/android-default-display-config-rotation.json", import.meta.url), "utf8"));
+    expect(parseAndroidGeometry(captured.display, captured.window, captured.size))
+      .toEqual({ width: 2944, height: 1840, rotation: 1, source: "display-frames" });
+    // A malformed or conflicting standalone runtime field must still fail closed.
+    expect(parseAndroidGeometry(captured.display, captured.window.replace("    mRotation=1 #", "    mRotation=undefined #"), captured.size)).toBeUndefined();
+    expect(parseAndroidGeometry(captured.display, captured.window.replace("    mRotation=1 #", "    mRotation=0 #"), captured.size)).toBeUndefined();
+    expect(parseAndroidGeometry("", "Display: mDisplayId=0\n  configuration={mRotation=ROTATION_90}", "Physical size: 1840x2944")).toBeUndefined();
+  });
+  it("keeps frames and rotation inside the explicit default window block", () => {
+    const external = "Display: mDisplayId=2\n  DisplayFrames w=900 h=600 r=0\n  mRotation=0";
+    const primary = "Display: mDisplayId=0\n  DisplayFrames w=2944 h=1840 r=1\n  mRotation=1";
+    expect(parseAndroidGeometry("", external + "\n" + primary + "\nWINDOW MANAGER WINDOWS\n  DisplayFrames w=7 h=8 r=2", ""))
+      .toEqual({ width: 2944, height: 1840, rotation: 1, source: "display-frames" });
+    expect(parseAndroidGeometry("", "Display: mDisplayId=0\n  noCurrentGeometry\n" + external, "Physical size: 1840x2944"))
+      .toBeUndefined();
+  });
+  it.each([
+    ['unscoped info', 'mDisplayInfo=DisplayInfo{"Unknown", real 2944 x 1840, rotation 1}', ""],
+    ['unscoped frames', "", "DisplayFrames w=2944 h=1840 r=1\nmRotation=1"],
+    ['external only', 'mDisplayInfo=DisplayInfo{"External", displayId 2, real 900 x 600, rotation 0}', "Display: mDisplayId=2\n  mRotation=1"]
+  ])("refuses %s rather than assuming the first display is default", (_name, info, window) => {
+    expect(parseAndroidGeometry(info!, window!, "Physical size: 1840x2944")).toBeUndefined();
+  });
+  it("refuses conflicting or invalid effective default information", () => {
+    const current = 'mDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 2944 x 1840, rotation 1}';
+    const conflicting = 'mOverrideDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 1840 x 2944, rotation 0}';
+    expect(parseAndroidGeometry(current + "\n" + conflicting, "", "")).toBeUndefined();
+    expect(parseAndroidGeometry(current, "Display: mDisplayId=0\n  DisplayFrames w=1840 h=2944 r=0", "")).toBeUndefined();
+    expect(parseAndroidGeometry(current, "Display: mDisplayId=0\n  DisplayFrames w=0 h=0 r=1", "")).toBeUndefined();
+    expect(parseAndroidGeometry('mOverrideDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 0 x 0, rotation 1}',
+      "Display: mDisplayId=0\n  DisplayFrames w=2944 h=1840 r=1", "")).toBeUndefined();
+    expect(parseAndroidGeometry('mBaseDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 1840 x 2944, rotation 0}\n'
+      + 'mOverrideDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 0 x 0, rotation 1}', "", "")).toBeUndefined();
+  });
+  it("uses base-only geometry only when its explicit default override is null", () => {
+    const base = 'mBaseDisplayInfo=DisplayInfo{"Built-in", displayId 0, real 1840 x 2944, rotation 0}';
+    expect(parseAndroidGeometry(base, "", "")).toBeUndefined();
+    const logical = "Logical Displays:\n  Display 0:\n    mDisplayId=0\n    " + base + "\n    mOverrideDisplayInfo=null\n"
+      + '  Display 2:\n    mDisplayId=2\n    mOverrideDisplayInfo=DisplayInfo{"External", displayId 2, real 900 x 600, rotation 0}';
+    expect(parseAndroidGeometry(logical, "", "")).toEqual({ width: 1840, height: 2944, rotation: 0, source: "display-info" });
+    expect(parseAndroidGeometry(logical.replace("    mOverrideDisplayInfo=null\n", ""), "", "")).toBeUndefined();
+  });
+  it("uses wm override dimensions only with an observed default-display rotation", () => {
+    expect(parseAndroidGeometry("", "Display: mDisplayId=0\n  mRotation=ROTATION_90", "Physical size: 1200x2000\nOverride size: 600x1000"))
       .toEqual({ width: 1000, height: 600, rotation: 1, source: "wm-size" });
     expect(parseAndroidGeometry("", "", "Physical size: 1200x2000")).toBeUndefined();
+    expect(parseAndroidGeometry("", "mRotation=ROTATION_90", "Physical size: 1200x2000")).toBeUndefined();
+    expect(parseAndroidGeometry("", "Display: mDisplayId=0\n  mRotation=0\n  mRotation=1", "Physical size: 1200x2000")).toBeUndefined();
+    expect(parseAndroidGeometry("", "Display: mDisplayId=0\n  mRotation=4", "Physical size: 1200x2000")).toBeUndefined();
   });
   it("extracts only the focused component rather than window text", () => {
     expect(parseAndroidApp("mCurrentFocus=Window{abc u0 com.example/.Editor}")).toEqual({ id: "com.example/.Editor", title: "com.example" });
@@ -120,12 +196,46 @@ describe("Android computer backend", () => {
     expect(test.calls.every(call => !Buffer.isBuffer(call.input))).toBe(true);
     expect(test.calls.some(call => /ime (?:enable|set|disable)\b/.test(String(call.input)))).toBe(false);
   });
-  it("installs only the hash-verified bundled APK during explicit setup", async () => {
-    const test = fixture({ installed: false });
+  it("installs the verified APK once using Android's stdin option boundary", async () => {
+    let installed = false;
+    // External contract: BasicShellCommandHandler.getNextOption consumes all "-" prefixes
+    // until "--"; PackageManagerShellCommand accepts the stdin "-" only after that scan.
+    // https://android.googlesource.com/platform/prebuilts/fullsdk/sources/+/88c7ff1cd72d6305ec59f97aadc2198cc2dc3592/android-34/com/android/modules/utils/BasicShellCommandHandler.java
+    const packageInstall = (args: string[], input: Buffer): NativeResult => {
+      let index = 0, replace = false, user: string | undefined, size: string | undefined;
+      while (index < args.length && args[index]!.startsWith("-")) {
+        const option = args[index++]!;
+        if (option === "--") break;
+        if (option === "-r") replace = true;
+        else if (option === "--user") user = args[index++];
+        else if (option === "-S") size = args[index++];
+        else return { stdout: Buffer.alloc(0), stderr: Buffer.from("Error: Unknown option: " + option), exitCode: 255 };
+      }
+      expect(args.slice(index)).toEqual(["-"]);
+      expect({ replace, user, size }).toEqual({ replace: true, user: "0", size: String(input.length) });
+      expect(input.equals(artifact)).toBe(true);
+      installed = true;
+      return ok("Success\n");
+    };
+    const rejected = packageInstall(["-r", "--user", "0", "-S", String(artifact.length), "-"], artifact);
+    expect(rejected.exitCode).toBe(255);
+    expect(rejected.stderr.toString()).toBe("Error: Unknown option: -");
+    expect(installed).toBe(false);
+
+    const test = fixture({
+      installed: false,
+      probe: () => ok(probe(installed)),
+      install: spec => {
+        expect(Buffer.isBuffer(spec.input)).toBe(true);
+        // All pm words here are fixed option names, a fixed executable, or numeric values.
+        const argv = [...spec.args[1]!.matchAll(/'([^']*)'/g)].map(match => match[1]!);
+        expect(argv.slice(0, 2)).toEqual(["/system/bin/pm", "install"]);
+        return packageInstall(argv.slice(2), spec.input as Buffer);
+      }
+    });
     expect(await test.backend.setup!(context)).toMatchObject({ installed: true, changed: true, sha256: bridge.sha256, inputMethodChanged: false });
     const install = test.calls.find(call => Buffer.isBuffer(call.input))!;
     expect(install.args[1]).toContain("timeout");
-    expect(install.args[1]).toContain("'install' '-r' '--user' '0'");
     const second = await test.backend.setup!(context);
     expect(second).toMatchObject({ installed: true, changed: false });
     expect(test.calls.filter(call => Buffer.isBuffer(call.input))).toHaveLength(1);
@@ -148,14 +258,85 @@ describe("Android computer backend", () => {
     expect(script).toContain("'disable' '--user' '0' '" + ANDROID_INPUT_METHOD + "'");
     expect(script).toContain("'expected_package' 'dev.cyjin.mcprelay.input'");
   });
-  it("requires the exact request acknowledgement and never replays a failed text", async () => {
+  it.each([
+    [20, "no_input_connection"], [21, "focus_changed"], [22, "commit_rejected"], [23, "commit_exception"]
+  ])("reports only exact bridge refusal %i/%s and never replays text", async (resultCode, status) => {
     const test = fixture({ act: spec => {
       const request = requestId(spec);
-      return ok('Broadcast completed: result=20, data="relay-input:' + request + ':no_input_connection"\n__RELAY_IME_RESTORED__' + request + ":1\n");
+      return ok('Broadcast completed: result=' + resultCode + ', data="relay-input:' + request + ':' + status + '"\n__RELAY_IME_RESTORED__' + request + ":1\n");
     } });
-    await expect(test.backend.act({ type: "text", text: "一次" }, display, context)).rejects.toMatchObject({ code: "android_text_unconfirmed", details: { mayHaveApplied: true } });
-    expect(test.calls.filter(call => String(call.input).includes("'.COMMIT'"))).toHaveLength(0);
+    await expect(test.backend.act({ type: "text", text: "一次" }, display, context)).rejects.toMatchObject({
+      code: "android_text_unconfirmed", details: { mayHaveApplied: true, bridgeAcknowledgement: "matched",
+        bridgeResultCode: resultCode, bridgeStatus: status }
+    });
+    expect(test.calls.filter(call => String(call.input).includes("'dev.cyjin.mcprelay.input.COMMIT'"))).toHaveLength(1);
     expect(test.calls.filter(call => String(call.input).includes("ime enable"))).toHaveLength(1);
+  });
+  it.each(["other", "unknown"])("does not retarget a captured app after the next probe reports %s", async variant => {
+    const switched = variant === "other"
+      ? probe().replace("dev.cyjin.mcprelay.input/.ProbeActivity", "com.example.other/.OtherActivity")
+      : probe().replace("mCurrentFocus=Window{11 u0 dev.cyjin.mcprelay.input/.ProbeActivity}", "mCurrentFocus=null");
+    const test = fixture({ probe: (_spec, index) => ok(index === 0 ? probe() : switched) });
+    expect((await test.backend.inspect(context)).app?.id).toBe(context.expectedAppId);
+    await expect(test.backend.act({ type: "text", text: "private input" }, display, context)).rejects.toMatchObject({
+      code: variant === "other" ? "focus_changed" : "android_focus_unknown",
+      details: { phase: "preflight", mayHaveApplied: false }
+    });
+    expect(test.calls.some(call => String(call.input).includes("/system/bin/ime enable"))).toBe(false);
+    expect(test.calls.some(call => String(call.input).includes("'dev.cyjin.mcprelay.input.COMMIT'"))).toBe(false);
+  });
+  it("requires a screenshot target and accepts only its equivalent full component", async () => {
+    const test = fixture();
+    await expect(test.backend.act({ type: "text", text: "unbound" }, display, { timeoutMs: 30000 }))
+      .rejects.toMatchObject({ code: "android_focus_unknown", details: { mayHaveApplied: false } });
+    expect(test.calls).toHaveLength(0);
+    await test.backend.act({ type: "text", text: "bound" }, display, {
+      ...context, expectedAppId: "dev.cyjin.mcprelay.input/dev.cyjin.mcprelay.input.ProbeActivity"
+    });
+    const script = String(test.calls.find(call => String(call.input).includes("/system/bin/ime enable"))!.input);
+    expect(script).toContain("'expected_package' 'dev.cyjin.mcprelay.input'");
+    const firstGate = script.indexOf("if ! relay_focus_wait;");
+    const enable = script.indexOf("/system/bin/ime enable");
+    const set = script.indexOf("/system/bin/ime set");
+    const recheck = script.indexOf("if ! relay_focus_snapshot;");
+    const commit = script.indexOf("'/system/bin/am' 'broadcast'");
+    expect(firstGate).toBeGreaterThanOrEqual(0); expect(firstGate).toBeLessThan(enable);
+    expect(set).toBeLessThan(recheck); expect(recheck).toBeLessThan(commit);
+  });
+  it("does not mutate IME state during cleanup after a proven pre-input focus refusal", async () => {
+    const test = fixture({ act: spec => ok("__RELAY_ANDROID_FOCUS_BLOCKED__"
+      + requestId(spec) + ":preflight:changed\n", 73) });
+    await expect(test.backend.act({ type: "text", text: "once" }, display, context)).rejects.toMatchObject({
+      code: "focus_changed", details: { phase: "preflight", mayHaveApplied: false }
+    });
+    expect(test.calls.filter(call => String(call.input).includes("relay_restore_input"))).toHaveLength(1);
+    expect(test.waits).toHaveLength(0);
+  });
+  it("rejects another nonce without exposing its data or replaying the commit", async () => {
+    const test = fixture({ act: spec => {
+      const request = requestId(spec), other = request === "0".repeat(32) ? "1".repeat(32) : "0".repeat(32);
+      return ok('private native output\nBroadcast completed: result=-1, data="relay-input:' + other
+        + ':ok"\n__RELAY_IME_RESTORED__' + request + ":1\n");
+    } });
+    const error = await test.backend.act({ type: "text", text: "private payload" }, display, context).catch(e => e);
+    expect(error).toMatchObject({ code: "android_text_unconfirmed", details: {
+      mayHaveApplied: true, bridgeAcknowledgement: "missing_or_invalid"
+    } });
+    expect(error.details).not.toHaveProperty("bridgeResultCode");
+    expect(error.details).not.toHaveProperty("bridgeStatus");
+    expect(JSON.stringify(error)).not.toMatch(/private native output|private payload/);
+    expect(test.calls.filter(call => String(call.input).includes("'dev.cyjin.mcprelay.input.COMMIT'"))).toHaveLength(1);
+  });
+  it("rejects mismatched, duplicate, or unrecognized exact-nonce code/status pairs", () => {
+    const request = "a".repeat(32);
+    const line = (code: number, status: string) => 'Broadcast completed: result=' + code
+      + ', data="relay-input:' + request + ':' + status + '"\n';
+    for (const output of [line(21, "ok"), line(-1, "focus_changed"), line(999, "ok"),
+      line(21, "private_native_value"), line(-1, "ok") + line(21, "focus_changed")]) {
+      expect(parseAndroidCommitAcknowledgement(output, request)).toBeUndefined();
+    }
+    expect(parseAndroidCommitAcknowledgement("private native output\n" + line(21, "focus_changed"), request))
+      .toEqual({ resultCode: 21, status: "focus_changed" });
   });
   it("keeps the lane until the root deadline and cleans up after client cancellation", async () => {
     const test = fixture({ act: (spec, index) => {
@@ -184,6 +365,42 @@ describe("Android computer backend", () => {
     await test.backend.act({ type: "click", x: 300, y: 500 }, { ...display, width: 600, height: 1000, scaleX: 0.5, scaleY: 0.5 }, context);
     expect(String(test.calls.at(-1)?.input)).toContain("'tap' '600' '1000'");
   });
+  it("uses scroll steps rather than raw pixels, including the omitted default", async () => {
+    const cases = [
+      { amount: undefined, frame: display, expected: ["600", "1180", "600", "820"] },
+      { amount: 3, frame: display, expected: ["600", "1180", "600", "820"] },
+      { amount: 1, frame: display, expected: ["600", "1060", "600", "940"] },
+      // 360 screenshot pixels still pass through the existing scale-to-native mapping.
+      { amount: 3, frame: { ...display, width: 600, height: 1000, scaleX: 0.5, scaleY: 0.5 },
+        expected: ["600", "1360", "600", "640"] }
+    ];
+    for (const item of cases) {
+      const test = fixture();
+      await test.backend.act({ type: "scroll", direction: "down",
+        ...(item.amount === undefined ? {} : { amount: item.amount }) }, item.frame, context);
+      expect(scrollCommands(test.calls)).toEqual([["/system/bin/input", "swipe", ...item.expected, "350"]]);
+    }
+  });
+  it("caps large scroll step requests at the current screenshot axis boundary", async () => {
+    for (const item of [
+      { direction: "down" as const, expected: ["600", "1750", "600", "250"] },
+      { direction: "right" as const, expected: ["1050", "1000", "150", "1000"] }
+    ]) {
+      const test = fixture();
+      await test.backend.act({ type: "scroll", direction: item.direction, amount: 40 }, display, context);
+      expect(scrollCommands(test.calls)).toEqual([["/system/bin/input", "swipe", ...item.expected, "350"]]);
+    }
+  });
+  it("rejects invalid scroll steps before sending any native input", async () => {
+    for (const amount of [0, -1, 1.5, 41, 350, Number.NaN, Number.POSITIVE_INFINITY, null, "3"]) {
+      const test = fixture();
+      await expect(test.backend.act({ type: "scroll", direction: "down", amount: amount as number }, display, context))
+        .rejects.toMatchObject({ code: "invalid_scroll" });
+      // Old pixel semantics accepted fractions, 41 and 350 and submitted a swipe.
+      expect(scrollCommands(test.calls)).toEqual([]);
+      expect(test.calls.every(call => String(call.input).includes("__RELAY_ANDROID_uid__"))).toBe(true);
+    }
+  });
   it("does not pretend separate keyevents are a key chord", async () => {
     const test = fixture({ combo: false });
     await expect(test.backend.act({ type: "key", keys: ["CTRL", "A"] }, display, context)).rejects.toMatchObject({ code: "unsupported_key_combination" });
@@ -194,5 +411,95 @@ describe("Android computer backend", () => {
     await expect(test.backend.act({ type: "move", x: 5, y: 5 }, display, context)).rejects.toMatchObject({ code: "unsupported_action" });
     await expect(test.backend.act({ type: "click", button: "right", x: 5, y: 5 }, display, context)).rejects.toMatchObject({ code: "unsupported_button" });
     await expect(test.backend.act({ type: "drag", fromX: 1, fromY: 1, toX: 2, toY: 2, durationMs: 6000 }, display, context)).rejects.toMatchObject({ code: "invalid_duration" });
+  });
+});
+
+describe("Android setup failure boundaries", () => {
+  it("labels failed preflight without exposing native output or attempting install", async () => {
+    const test = fixture({ installed: false, probe: () => ({
+      ...ok("private-native-stdout", 255), stderr: Buffer.from("java.lang.SecurityException: private-native-stderr")
+    }) });
+    const error = await test.backend.setup!(context).catch(error => error);
+    expect(error).toMatchObject({ code: "android_command_failed",
+      details: { exitCode: 255, phase: "preflight", mayHaveApplied: false } });
+    expect(JSON.stringify({ message: error.message, details: error.details })).not.toContain("private-native");
+    expect(error.details).not.toHaveProperty("packageManagerCategory");
+    expect(test.calls).toHaveLength(1);
+    expect(test.calls.some(call => Buffer.isBuffer(call.input))).toBe(false);
+  });
+  it("retains an explicit cancellation before the installer starts", async () => {
+    const controller = new AbortController();
+    const test = fixture({ installed: false, probe: () => {
+      controller.abort();
+      return ok(probe(false));
+    } });
+    await expect(test.backend.setup!({ ...context, signal: controller.signal })).rejects.toMatchObject({
+      code: "cancelled", details: { phase: "install", mayHaveApplied: false }
+    });
+    expect(test.calls).toHaveLength(1);
+    expect(test.calls.some(call => Buffer.isBuffer(call.input))).toBe(false);
+  });
+  it("keeps installation uncertainty and safe package code without retrying", async () => {
+    const test = fixture({ installed: false, install: () => ({
+      ...ok("Failure [INSTALL_FAILED_USER_RESTRICTED: private-install-stdout]", 255),
+      stderr: Buffer.from("private-install-stderr")
+    }) });
+    const error = await test.backend.setup!(context).catch(error => error);
+    expect(error).toMatchObject({ code: "android_command_failed", details: {
+      exitCode: 255, phase: "install", mayHaveApplied: true, packageManagerCode: "INSTALL_FAILED_USER_RESTRICTED"
+    } });
+    expect(JSON.stringify({ message: error.message, details: error.details })).not.toContain("private-install");
+    expect(test.calls).toHaveLength(2);
+    expect(test.calls.filter(call => Buffer.isBuffer(call.input))).toHaveLength(1);
+    expect(test.waits.reduce((sum, ms) => sum + ms, 0)).toBeGreaterThanOrEqual(16000);
+  });
+  it("keeps a successful install uncertain when its read-only verification fails", async () => {
+    const test = fixture({ installed: false, probe: (_spec, index) =>
+      index === 0 ? ok(probe(false)) : ok("", 255) });
+    await expect(test.backend.setup!(context)).rejects.toMatchObject({ code: "android_command_failed",
+      details: { exitCode: 255, phase: "verification", mayHaveApplied: true } });
+    expect(test.calls).toHaveLength(3);
+    expect(test.calls.filter(call => Buffer.isBuffer(call.input))).toHaveLength(1);
+  });
+  it("labels an installed APK hash mismatch as verification uncertainty", async () => {
+    const test = fixture({ installed: false, probe: () => ok(probe(false)) });
+    await expect(test.backend.setup!(context)).rejects.toMatchObject({
+      code: "android_bridge_install_unconfirmed", details: { phase: "verification", mayHaveApplied: true }
+    });
+    expect(test.calls.filter(call => Buffer.isBuffer(call.input))).toHaveLength(1);
+  });
+  it("sanitizes unexpected verification errors after installation", async () => {
+    const test = fixture({ installed: false, probe: (_spec, index) => {
+      if (index === 0) return ok(probe(false));
+      throw new Error("private-verification-input");
+    } });
+    const error = await test.backend.setup!(context).catch(error => error);
+    expect(error).toMatchObject({ code: "android_setup_failed",
+      details: { phase: "verification", mayHaveApplied: true } });
+    expect(error.message).not.toContain("private-verification-input");
+    expect(test.calls.filter(call => Buffer.isBuffer(call.input))).toHaveLength(1);
+  });
+});
+
+describe("Android install failure diagnostics", () => {
+  it.each(["INSTALL_FAILED_USER_RESTRICTED", "INSTALL_PARSE_FAILED_BAD_MANIFEST"])(
+    "returns only the bounded package-manager code %s", code => {
+      expect(parseAndroidInstallFailure("Failure [" + code + ": /private/app.apk]", "private user input"))
+        .toEqual({ packageManagerCode: code });
+    });
+  it.each([
+    ["java.lang.SecurityException: /private/app.apk", "package_manager_security_exception"],
+    ["Error: Unknown option --private-value", "unsupported_install_option"],
+    ["cmd: Can't find service: package", "package_service_unavailable"]
+  ])("classifies installation failure without returning native text", (message, category) => {
+    expect(parseAndroidInstallFailure("private stdout", message + "\nprivate user input"))
+      .toEqual({ packageManagerCategory: category });
+  });
+  it("omits unknown output and overlong or malformed codes", () => {
+    for (const output of [
+      "Failure [/private/app.apk: private user input]",
+      "INSTALL_FAILED_" + "X".repeat(81),
+      "INSTALL_FAILED_secret_value"
+    ]) expect(parseAndroidInstallFailure(output, "")).toEqual({});
   });
 });
