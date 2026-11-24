@@ -49,6 +49,8 @@ async function main(): Promise<void> {
   const expectedKeyboard = process.env.RELAY_TEST_KEYBOARD === "1";
   let observed: Partial<Observation> = {};
   let diagnostic = "";
+  let protocolPending = "";
+  const protocolInput = { motion: 0, axis: 0, button: 0, key: 0 };
   let fixture: ChildProcessWithoutNullStreams | undefined;
   mkdirSync(evidence, { recursive: true });
   const context = (timeoutMs = 15000): NativeContext => ({ timeoutMs, signal: AbortSignal.timeout(timeoutMs) });
@@ -78,15 +80,20 @@ async function main(): Promise<void> {
     assert.equal(exit, 0, "Native fixture " + mode + ": " + output + "\n" + stderr);
     return JSON.parse(output.trim());
   }
-  async function inputCounters(): Promise<Record<string, number>> {
+  async function inputSnapshot() {
     const nonce = randomUUID();
     fixture!.stdin.write(JSON.stringify({ operation: "snapshot", nonce }) + "\n");
     await until(() => observed.snapshotNonce === nonce, "Fresh native fixture acknowledgement");
-    return Object.fromEntries((["clicks", "drags", "motion", "scrollX", "scrollY", "keyPresses"] as const)
-      .map(key => [key, Number(observed[key])]));
+    return {
+      counters: Object.fromEntries((["clicks", "drags", "scrollX", "scrollY", "keyPresses"] as const)
+        .map(key => [key, Number(observed[key])])),
+      pointer: observed.devicePointer ?? observed.lastPointer ?? null,
+      gtkMotionNotifications: Number(observed.motion),
+      protocol: { ...protocolInput },
+    };
   }
   async function authorize(requireInput = true, noInputLabel?: string): Promise<ComputerState> {
-    const beforeInput = noInputLabel ? await inputCounters() : undefined;
+    const beforeInput = noInputLabel ? await inputSnapshot() : undefined;
     const pending = outcome(backend.setup!(context(30000)));
     const clicked = await python("allow");
     assert.equal(clicked.dialogAction, "Share");
@@ -112,9 +119,20 @@ async function main(): Promise<void> {
     fixture!.stdin.write(JSON.stringify({ operation: "present" }) + "\n");
     await delay(300);
     if (beforeInput) {
-      assert.deepEqual(await inputCounters(), beforeInput,
-        "Portal setup must not move, click, scroll or type in the native application");
-      passed(noInputLabel + " initializes devices without application input events");
+      const afterInput = await inputSnapshot();
+      probes.setupNoInput ??= {};
+      probes.setupNoInput[noInputLabel!] = { before: beforeInput, after: afterInput };
+      assert.deepEqual(afterInput.counters, beforeInput.counters,
+        "Portal setup must not click, drag, scroll or type in the native application");
+      // GTK may synthesize a same-position motion notification when views or
+      // seat devices are rebound. Preserve the actual GDK position and raw
+      // Wayland motion/axis/button/key gates rather than treating that widget
+      // notification as a physical cursor displacement.
+      assert.deepEqual(afterInput.protocol, beforeInput.protocol,
+        "Portal setup must not deliver Wayland motion, nonzero axis, button or key events");
+      if (beforeInput.pointer) assert.deepEqual(afterInput.pointer, beforeInput.pointer,
+        "Portal setup must preserve the independently observed native pointer position");
+      passed(noInputLabel + " does not move the pointer, click, scroll or type");
     }
     return state;
   }
@@ -179,6 +197,16 @@ async function main(): Promise<void> {
     fixture.stderr.on("data", bytes => {
       diagnostic = (diagnostic + String(bytes)).slice(-16000);
       appendFileSync(join(evidence, "fixture-wayland.log"), bytes, { mode: 0o600 });
+      protocolPending += String(bytes);
+      const lines = protocolPending.split("\n");
+      protocolPending = lines.pop() ?? "";
+      for (const line of lines) {
+        const pointer = line.match(/\bwl_pointer(?:@|#)\d+\.(motion|axis|axis_discrete|axis_value120|button)\(([^)]*)\)/);
+        if (pointer?.[1] === "motion") protocolInput.motion++;
+        else if (pointer?.[1] === "button") protocolInput.button++;
+        else if (pointer && Number(pointer[2]!.split(",").at(-1)) !== 0) protocolInput.axis++;
+        if (/\bwl_keyboard(?:@|#)\d+\.key\(/.test(line)) protocolInput.key++;
+      }
     });
     fixture.once("exit", (code, signal) => { diagnostic += ` fixture-exit=${code}/${signal}`; });
     await until(() => Boolean(observed.displayType) && Number(observed.logicalWidth) >= 640, "Native GTK fixture readiness");
@@ -255,6 +283,9 @@ async function main(): Promise<void> {
     await until(() => Number(observed.scrollY) > 0, "Vertical native scroll");
     await act({ type: "scroll", direction: "right", amount: 2, ...pixel(screen, 300, 260) }, screen);
     await until(() => Number(observed.scrollX) > 0, "Horizontal native scroll");
+    assert.ok(protocolInput.motion > 0 && protocolInput.button > 0 && protocolInput.axis > 0,
+      "The raw Wayland observer must independently record actual pointer input");
+    if (expectedKeyboard) assert.ok(protocolInput.key > 0, "The raw observer must record native keyboard input");
     passed("both scroll axes reach the native GTK widget");
 
     const abort = new AbortController();
