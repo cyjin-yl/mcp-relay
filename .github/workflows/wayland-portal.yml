@@ -76,6 +76,10 @@ jobs:
         if: always()
         with:
           name: wayland-portal-native-scale-${{ matrix.scale }}
-          path: ${{ runner.temp }}/relay-wayland-native
+          path: |
+            ${{ runner.temp }}/relay-wayland-native/*.log
+            ${{ runner.temp }}/relay-wayland-native/*.json
+            ${{ runner.temp }}/relay-wayland-native/*.png
+            ${{ runner.temp }}/relay-wayland-native/*version.txt
           if-no-files-found: warn
           retention-days: 14

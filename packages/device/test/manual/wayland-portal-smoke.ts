@@ -162,12 +162,13 @@ async function main(): Promise<void> {
     checks.push("an unchanged desktop can be captured again without stale-frame timeout");
 
     await act({ type: "click", ...pixel(screen, 100, 40) }, screen);
-    await act({ type: "text", text: "Relay 42" }, screen);
-    await until(() => observed.text === "Relay 42", "Actual GTK entry receives ASCII text");
+    const ascii = "Relay 42 !@#:/[]{}?";
+    await act({ type: "text", text: ascii }, screen);
+    await until(() => observed.text === ascii, "Actual GTK entry receives uppercase and punctuation");
     await act({ type: "key", keys: ["Control_L", "a"] }, screen);
     await act({ type: "text", text: "replacement" }, screen);
     await until(() => observed.text === "replacement", "Actual selection chord and replacement");
-    checks.push("ASCII text and keyboard chord affect the native GTK entry");
+    checks.push("uppercase ASCII, punctuation and keyboard chords affect the native GTK entry");
     assert.equal(state.unicodeText, false);
     await assert.rejects(() => backend.act({ type: "text", text: "partial中文" }, screen, context()));
     await delay(100);

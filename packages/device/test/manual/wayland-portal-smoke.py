@@ -206,8 +206,14 @@ def portal_nodes():
 
 def node_details(node):
     try:
-        return {"name": node.name or "", "role": node.getRoleName(),
-                "states": [str(x) for x in node.getState().getStates()]}
+        details = {"name": node.name or "", "role": node.getRoleName(),
+                   "states": [str(x) for x in node.getState().getStates()]}
+        try:
+            action = node.queryAction()
+            details["actions"] = [action.getName(i) for i in range(action.nActions)]
+        except Exception:
+            pass
+        return details
     except Exception:
         return {"name": "<defunct>"}
 
@@ -217,7 +223,19 @@ def actionable(node):
 
     try:
         states = node.getState()
-        return states.contains(pyatspi.STATE_SHOWING) and states.contains(pyatspi.STATE_SENSITIVE)
+        if not states.contains(pyatspi.STATE_VISIBLE) or not states.contains(pyatspi.STATE_SENSITIVE):
+            return False
+        # GTK 4.8 exports SHOWING on its toplevel, but only VISIBLE on the
+        # descendant buttons. Require that actual visible toplevel rather
+        # than treating this toolkit difference as a missing consent dialog.
+        ancestor = node
+        for _depth in range(16):
+            if ancestor is None:
+                break
+            if ancestor.getState().contains(pyatspi.STATE_SHOWING):
+                return True
+            ancestor = ancestor.parent
+        return False
     except Exception:
         return False
 
@@ -241,8 +259,12 @@ def consent(mode):
     acted = set()
     while time.monotonic() < deadline:
         nodes = portal_nodes()
-        share = [n for n in nodes if (n.name or "").replace("_", "").strip().lower() == "share"]
-        cancel = [n for n in nodes if (n.name or "").replace("_", "").strip().lower() == "cancel"]
+        def button_named(node, expected):
+            words = set((node.name or "").replace("_", "").strip().lower().split())
+            return words == {expected} and node.getRoleName() == "push button"
+
+        share = [n for n in nodes if button_named(n, "share")]
+        cancel = [n for n in nodes if button_named(n, "cancel")]
         showing = [n for n in share + cancel if actionable(n)]
         if mode == "absent":
             if not showing:

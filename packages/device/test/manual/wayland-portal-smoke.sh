@@ -95,12 +95,18 @@ export RELAY_TEST_PORTAL_PID="$!"
 relay_owned_pids+=("$RELAY_TEST_PORTAL_PID")
 relay_portal_ready=false
 for relay_attempt in {1..20}; do
-  if timeout 2 gdbus call --session --dest org.freedesktop.portal.Desktop \
+  # Waiting on the bus daemon does not auto-activate a competing portal while
+  # the explicitly launched process is still acquiring its well-known name.
+  if timeout 2 gdbus call --session --dest org.freedesktop.DBus \
+    --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetNameOwner \
+    org.freedesktop.portal.Desktop >/dev/null 2>&1; then
+    if timeout 2 gdbus call --session --dest org.freedesktop.portal.Desktop \
     --object-path /org/freedesktop/portal/desktop \
     --method org.freedesktop.DBus.Properties.Get org.freedesktop.portal.RemoteDesktop version \
     > "$RELAY_NATIVE_EVIDENCE_DIR/portal-version.txt" 2>/dev/null; then
-    relay_portal_ready=true
-    break
+      relay_portal_ready=true
+      break
+    fi
   fi
   sleep 0.2
 done
