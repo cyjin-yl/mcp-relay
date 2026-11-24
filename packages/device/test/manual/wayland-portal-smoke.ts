@@ -188,17 +188,29 @@ async function main(): Promise<void> {
 
     await act({ type: "click", ...pixel(screen, 100, 40) }, screen);
     const ascii = "Relay 42 !@#:/[]{}?";
-    await act({ type: "text", text: ascii }, screen);
-    await until(() => observed.text === ascii, "Actual GTK entry receives uppercase and punctuation");
-    await until(() => observed.keys?.length === 0, "All printable ASCII modifiers and keys are released");
-    await act({ type: "key", keys: ["Control_L", "a"] }, screen);
-    await act({ type: "text", text: "replacement" }, screen);
-    await until(() => observed.text === "replacement", "Actual selection chord and replacement");
-    passed("uppercase ASCII, punctuation and keyboard chords affect the native GTK entry");
+    if (expectedTransport === "eis") {
+      assert.ok(state.actions.includes("key") && state.actions.includes("text"));
+      await act({ type: "text", text: ascii }, screen);
+      await until(() => observed.text === ascii, "Actual GTK entry receives uppercase and punctuation");
+      await until(() => observed.keys?.length === 0, "All printable ASCII modifiers and keys are released");
+      await act({ type: "key", keys: ["Control_L", "a"] }, screen);
+      await act({ type: "text", text: "replacement" }, screen);
+      await until(() => observed.text === "replacement", "Actual selection chord and replacement");
+      passed("EIS uppercase ASCII, punctuation and keyboard chords affect the native GTK entry");
+    } else {
+      assert.ok(!state.actions.includes("key") && !state.actions.includes("text"));
+      for (const action of [{ type: "text", text: ascii }, { type: "key", keys: ["Control_L", "a"] }] as ComputerAction[]) {
+        await assert.rejects(() => backend.act(action, screen, context()), { code: "keyboard_unavailable" });
+      }
+      await delay(150);
+      assert.equal(observed.text, "", "Unsupported legacy keyboard input must not alter the native GTK entry");
+      assert.deepEqual(observed.keys, []);
+      passed("legacy advertises pointer-only control and atomically refuses text and keyboard chords");
+    }
     assert.equal(state.unicodeText, false);
     await assert.rejects(() => backend.act({ type: "text", text: "partial中文" }, screen, context()));
     await delay(100);
-    assert.equal(observed.text, "replacement", "Unsupported text must not be partially entered");
+    assert.equal(observed.text, expectedTransport === "eis" ? "replacement" : "", "Unsupported text must not be partially entered");
     passed("unsupported Unicode is refused before partial text input");
 
     await act({ type: "click", ...pixel(screen, 100, 100) }, screen);

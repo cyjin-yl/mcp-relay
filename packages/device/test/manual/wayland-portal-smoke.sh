@@ -32,6 +32,11 @@ export RELAY_WAYLAND_NATIVE_TEST=nested-mutter-private-bus
 export MUTTER_DEBUG_NUM_DUMMY_MONITORS=1
 export MUTTER_DEBUG_DUMMY_MODE_SPECS=1600x1200
 export MUTTER_DEBUG_DUMMY_MONITOR_SCALES="${RELAY_TEST_SCALE:-1}"
+if [ "${RELAY_TEST_INPUT_TRANSPORT:-}" = eis ]; then
+  # Upstream EIS topology traces distinguish a real keymap/device replacement
+  # from a monitor-region change when the production input fence fires.
+  export MUTTER_DEBUG=eis
+fi
 relay_outer_display=:89
 relay_owned_pids=()
 relay_cleanup() {

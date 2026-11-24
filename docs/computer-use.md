@@ -177,7 +177,7 @@ normal command execution must not open a PowerShell/Terminal window.
 | Windows | Win32 capture, physical display coordinates, SendInput and UTF-16 text | Interactive user session; PowerShell 7 or Windows PowerShell 5.1 |
 | macOS (primary screen) | Quartz/JXA input, screencapture, Retina coordinate conversion | Aqua desktop; locally granted Screen Recording and Accessibility permissions |
 | Linux X11 | ImageMagick capture; XTEST via xdotool | Intended DISPLAY/XAUTHORITY; ImageMagick and xdotool |
-| Linux Wayland | RemoteDesktop and ScreenCast portals; authorized PipeWire PNG capture and portal keyboard/pointer input | Desktop session bus; distribution Python with PyGObject/GStreamer; PipeWire capture plugin; a portal backend providing both interfaces; explicit local consent |
+| Linux Wayland | RemoteDesktop and ScreenCast portals; authorized PipeWire PNG capture and EIS input, with guarded compatibility for older GNOME desktops | Desktop session bus; distribution Python with PyGObject/GStreamer; PipeWire capture plugin; a portal backend providing both interfaces; explicit local consent; libei and libxkbcommon for EIS |
 | Proxmox local QEMU VMs | Host VM discovery and QEMU virtual-console capture/input | PVE host access to qm and the selected VM's monitor; a guest virtual display |
 | Android | su, screencap, input, rotation checks, signed Unicode IME | Existing authorized su; system toybox timeout; Android 6+ for the bridge |
 
@@ -224,9 +224,20 @@ as unavailable for input; relay does not fall back to XWayland control.
 Each capture opens a fresh authorized PipeWire connection and encodes its current
 frame as PNG. It does not reuse a screenshot cached before an input operation.
 Display identity includes the permission session and stream identity. Before input,
-the helper rechecks the capture dimensions and rejects stale geometry. The portal's
-logical monitor size supplies the screenshot-to-input scale; ambiguous or missing
-geometry fails closed.
+the helper rechecks the capture dimensions and rejects stale geometry. Input support
+depends on the desktop's available mapping protocol:
+
+| Desktop capability | Input behavior |
+| --- | --- |
+| RemoteDesktop EIS connection and ScreenCast monitor mapping IDs, with a compatible libei and libxkbcommon | Each shared monitor must match one live EIS region. Screenshot pixels map to that region's coordinates, including scaled monitors. Device replacement or region changes invalidate prior frames. The compositor supplies the keyboard map. |
+| Older GNOME portal without usable EIS | Pointer actions are limited to unrotated monitors at scale 1. Relay freezes the read-only Mutter DisplayConfig state before consent, binds the selected streams to that unchanged layout, and checks the owner, serial and layout before each input event. A display change requires fresh setup. Keyboard and text actions are unavailable because this protocol does not supply the compositor keymap and modifier state needed for reliable text. |
+| Other authorized capture with no reliable input mapping | Screenshots remain available; input is disabled and `computer_info` explains the missing capability. |
+
+The EIS library must expose monitor mapping and synchronization support; Debian
+package names include `libei1` and `libxkbcommon0`. After connecting EIS, relay never
+falls back to legacy Notify input within that permission session. `computer_info`
+reports the active transport in `details.inputTransport`. The helper does not
+change monitor settings, keyboard layouts or desktop permission databases.
 
 Permissions last only for the current worker connection. Disconnecting, pausing,
 disabling computer control, cancelling a request, losing the portal, or leaving the
@@ -237,10 +248,14 @@ permission database is modified, and the helper has no listening network socket.
 Held keys and buttons are released on cancellation where the portal remains available;
 closing the DBus connection also ends the compositor's remote input session.
 
-Wayland text supports **printable ASCII only**. Unsupported Unicode and control
-characters are rejected before any input, including embedded newline and tab;
-use explicit key actions for Enter or Tab. No clipboard is read or changed. Key
-submission still needs a follow-up screenshot to verify the application result.
+Wayland text is available through EIS and supports **printable ASCII only**. The active compositor
+keyboard map must represent the complete string using unmodified or Shift keys;
+unsupported characters are rejected before input begins. Unicode and control
+characters are also rejected, including embedded newline and tab; use explicit key
+actions for Enter or Tab. No clipboard is read or changed. Keyboard layout or
+modifier changes can interrupt a text operation; application handling and concurrent
+local input can still affect the result. Follow input with a fresh screenshot to
+verify the application result.
 
 This portal path operates the selected foreground monitor. Isolated Linux workspaces
 remain the existing Xpra/Xvfb provider and still need a verified X11/XWayland return

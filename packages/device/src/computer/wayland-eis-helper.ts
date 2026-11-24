@@ -163,6 +163,7 @@ class EisInput:
         self.connected = False
         self.devices = {}
         self.generation = 0
+        self.device_changes = []
         self.sequence = 0
         self.held = []
         self.expected_ping = None
@@ -199,6 +200,13 @@ class EisInput:
         ctx.check()
         if self.session_check is not None:
             self.session_check(ctx)
+
+    def changed(self, kind, record):
+        self.generation += 1
+        self.device_changes.append({"generation": self.generation,
+            "event": {5: "added", 6: "removed", 7: "paused", 8: "resumed"}[kind],
+            "capabilities": sorted(record["caps"]), "virtual": record["virtual"]})
+        self.device_changes = self.device_changes[-16:]
 
     def pump(self, wait=0):
         if not self.context:
@@ -237,7 +245,7 @@ class EisInput:
                             keymap = api.ei_device_keyboard_get_keymap(device)
                             if keymap:
                                 record["keyboard"] = XkbKeyboard(self.api, keymap)
-                        self.generation += 1
+                        self.changed(kind, record)
                     elif kind == 9:
                         record = self.devices.get(pointer)
                         if record and record["keyboard"]:
@@ -248,7 +256,7 @@ class EisInput:
                         record = self.devices.get(pointer)
                         if not record:
                             continue
-                        self.generation += 1
+                        self.changed(kind, record)
                         if kind in (6, 7):
                             # EI pause/removal neutralizes the server device.
                             # Never send an up event through a dead device pointer.
@@ -358,16 +366,18 @@ class EisInput:
         result.update(x=x, y=y, scaleX=result["width"] / width, scaleY=result["height"] / height,
                       instanceId=stream["epoch"] + ":" + str(stream["serial"] or stream["node"]) + ":ei:" + str(self.generation))
 
-    def check(self, ctx, generation):
+    def check(self, ctx, generation, phase="input"):
         self.check_session(ctx)
         self.pump()
         if not self.connected:
             raise Failure("eis_disconnected", "The compositor EIS input connection closed.")
         if generation != self.generation:
-            raise Failure("display_changed", "The compositor input devices or monitor regions changed. Capture a new frame.")
+            raise Failure("display_changed", "The compositor input devices or monitor regions changed. Capture a new frame.", {
+                "phase": phase, "expectedGeneration": generation, "currentGeneration": self.generation,
+                "deviceChanges": [change for change in self.device_changes if change["generation"] > generation]})
 
     def key(self, record, code, pressed, ctx, generation):
-        self.check(ctx, generation)
+        self.check(ctx, generation, "keyboard-event")
         pointer = record["pointer"]
         if pressed:
             self.held.append(("key", pointer, code))
@@ -418,7 +428,7 @@ class EisInput:
                 raise Failure("input_unavailable", "The EIS keyboard is not active.")
             plan, baseline = keyboard["keyboard"].plan(symbols, text=kind == "text")
         def move(x, y):
-            self.check(ctx, generation)
+            self.check(ctx, generation, "pointer-motion")
             mapped = self.region(stream["mapping"])
             if mapped is None:
                 raise Failure("display_changed", "The EIS monitor region disappeared.")
@@ -429,7 +439,7 @@ class EisInput:
             self.frame(pointer)
             self.api.ei.ei_dispatch(self.context)
         def button(code, pressed):
-            self.check(ctx, generation)
+            self.check(ctx, generation, "pointer-button")
             record = self.device(32, seat, selected)
             if record is None:
                 raise Failure("input_unavailable", "The EIS pointer buttons are not active.")
@@ -465,7 +475,7 @@ class EisInput:
             elif kind == "scroll":
                 if "x" in action:
                     move(action["x"], action["y"])
-                self.check(ctx, generation)
+                self.check(ctx, generation, "scroll")
                 record = self.device(16, seat, selected)
                 if record is None:
                     raise Failure("input_unavailable", "The EIS scroll device is not active.")
@@ -490,7 +500,7 @@ class EisInput:
                 # modifier transaction. No clipboard and no implicit Enter/Tab.
                 for extra, code in plan:
                     self.sync(ctx)
-                    self.check(ctx, generation)
+                    self.check(ctx, generation, "text")
                     current = keyboard["keyboard"].mask()
                     if current != baseline:
                         raise Failure("keyboard_state_changed", "Keyboard modifiers or layout changed during text input; remaining text was not sent.", {"mayHaveApplied": True})
@@ -501,7 +511,7 @@ class EisInput:
                     for modifier in reversed(extra):
                         self.key(keyboard, modifier, False, ctx, generation)
             self.sync(ctx)
-            self.check(ctx, generation)
+            self.check(ctx, generation, "input-flush")
         finally:
             if not self.release():
                 raise Failure("input_cleanup_failed", "EIS input release failed; the portal session must close.")

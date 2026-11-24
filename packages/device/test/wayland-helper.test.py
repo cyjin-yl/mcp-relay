@@ -84,32 +84,41 @@ class HelperInputTests(unittest.TestCase):
             self.failure("text_unsupported", {"type": "text", "text": text})
         self.assertEqual(self.events, [])
 
-    def test_printable_ascii_text_does_not_change_clipboard_or_submit(self):
-        self.portal.act({"type": "text", "text": "Ab !"}, dict(DISPLAY), Context(2000))
-        self.assertEqual(self.events, [("NotifyKeyboardKeysym", (symbol, state))
-            for symbol in (65, 98, 32, 33) for state in (1, 0)])
+    def test_legacy_keyboard_is_not_advertised_or_partially_sent(self):
+        self.portal.capture = lambda *_: self.fail("unavailable keyboard must fail before capture")
+        state = self.portal.state(Context(2000), probe=False)
+        self.assertEqual(state["actions"], ["move", "click", "drag", "scroll"])
+        self.assertEqual(state["details"]["inputTransport"], "gnome-legacy")
+        self.assertIn("pointer actions only", state["details"]["textSupport"])
+        for action in ({"type": "text", "text": "Relay 42 !@#:/[]{}?"},
+                       {"type": "key", "keys": ["ctrl", "a"]}):
+            self.failure("keyboard_unavailable", action)
+        self.assertEqual(self.events, [])
+        self.assertTrue(self.portal.active)
 
     def test_out_of_range_and_boolean_coordinates_never_send_input(self):
         for coordinate in (800, -1, True, 1.5):
             self.failure("out_of_bounds", {"type": "move", "x": coordinate, "y": 0})
         self.assertEqual(self.events, [])
 
-    def test_cancelled_chord_releases_all_possibly_pressed_keys_in_reverse_order(self):
+    def test_cancelled_drag_releases_possibly_pressed_button(self):
         def notify(method, signature, arguments, ctx):
             self.events.append((method, arguments))
             if len(self.events) == 2:
-                raise Failure("cancelled", "Injected cancellation during second keydown")
+                raise Failure("cancelled", "Injected cancellation during button down")
         self.portal.notify = notify
-        self.failure("cancelled", {"type": "key", "keys": ["ctrl", "shift"]})
-        self.assertEqual([call[4][1][2:] for call in self.portal.bus.calls], [(0xffe1, 0), (0xffe3, 0)])
-        self.assertEqual(self.portal.held_keys, [])
+        self.failure("cancelled", {"type": "drag", "fromX": 20, "fromY": 20, "toX": 40, "toY": 40})
+        self.assertEqual([call[4][1][2:] for call in self.portal.bus.calls], [(272, 0)])
+        self.assertEqual(self.portal.held_buttons, [])
 
     def test_release_failure_closes_the_entire_grant(self):
         self.portal.bus = FakeBus(fail=True)
-        def notify(*_):
-            raise Failure("portal_unavailable", "Injected failure after key may have applied")
+        def notify(method, signature, arguments, ctx):
+            self.events.append((method, arguments))
+            if len(self.events) == 2:
+                raise Failure("portal_unavailable", "Injected failure after button may have applied")
         self.portal.notify = notify
-        self.failure("input_cleanup_failed", {"type": "key", "keys": ["ctrl"]})
+        self.failure("input_cleanup_failed", {"type": "click", "x": 20, "y": 20})
         self.assertFalse(self.portal.active)
         self.assertIsNone(self.portal.session)
         self.assertTrue(any(call[2:4] == (MODULE["SESSION"], "Close") for call in self.portal.bus.calls))

@@ -119,8 +119,8 @@ def keysym(name):
 def text_keysyms(text):
     if not isinstance(text, str) or len(text) > 16384:
         raise Failure("invalid_action", "Wayland text must contain at most 16384 characters.")
-    # NotifyKeyboardKeysym cannot guarantee arbitrary Unicode on all compositor
-    # keymaps. Never send a partial string and then discover an unsupported key.
+    # Preflight the whole string before the EIS keyboard map is consulted.
+    # Never send part of a string and then discover a control or Unicode key.
     if any(not 32 <= ord(c) <= 126 for c in text):
         raise Failure("text_unsupported", "This Wayland backend supports printable ASCII text only. Use an explicit key action for Enter or Tab; arbitrary Unicode requires compositor-specific support.")
     return [ord(c) for c in text]
@@ -438,7 +438,7 @@ class Portal:
             "sessionPersistence": "None; permission is released on helper exit, disconnect, handoff or five idle minutes",
             "inputTransport": "eis" if self.eis is not None else "gnome-legacy" if input_available else "none",
             "inputMethod": "EIS/libei with compositor XKB map" if self.eis is not None else "RemoteDesktop Notify with live GNOME layout guard" if input_available else "capture-only",
-            "textSupport": "Printable ASCII representable by the active keyboard map with unmodified or Shift keys; Enter and Tab require explicit key actions. Application keyboard handling and concurrent local input may vary.",
+            "textSupport": "Printable ASCII representable by the active keyboard map with unmodified or Shift keys; Enter and Tab require explicit key actions. Application keyboard handling and concurrent local input may vary." if self.eis is not None else "Keyboard and text input require EIS with a compositor keyboard map. Legacy Notify input supports pointer actions only because it cannot resolve the active keyboard map and modifiers.",
             "clipboardAccess": False,
             "xwaylandIgnored": bool(os.environ.get("DISPLAY")),
             "remoteDesktopVersion": self.remote_properties.get("version"),
@@ -455,7 +455,7 @@ class Portal:
             "displayKind": "physical" if available else "none",
             "inputKind": "mouse_keyboard" if input_available else "none",
             "displays": [dict(stream["display"]) for stream in self.streams] if available else [],
-            "actions": ["move", "click", "drag", "scroll", "key", "text"] if input_available else [],
+            "actions": (["move", "click", "drag", "scroll"] + (["key", "text"] if self.eis is not None else [])) if input_available else [],
             "unicodeText": False,
             "permissions": {"screenCapture": "granted" if available else self.permission,
                             "input": "granted" if input_available else "denied" if available else self.permission, "unlocked": "unknown"},
@@ -654,7 +654,7 @@ class Portal:
                     stream["display"].update(width=width, height=height,
                         scaleX=width / logical[0] if logical else 1, scaleY=height / logical[1] if logical else 1)
                     if self.eis is not None:
-                        self.eis.check(ctx, eis_generation)
+                        self.eis.check(ctx, eis_generation, "capture")
                         self.eis.display(stream)
                     return {"data": base64.b64encode(data).decode("ascii"), "mimeType": "image/png",
                         "display": dict(stream["display"]), "capturedAt": int(time.time() * 1000)}
@@ -691,6 +691,8 @@ class Portal:
         if any(expected[key] != stream["display"][key] for key in expected):
             raise Failure("display_changed", "The Wayland monitor geometry changed; capture a new frame.")
         symbols = validate_action(action, stream["display"])
+        if self.eis is None and action["type"] in ("key", "text"):
+            raise Failure("keyboard_unavailable", "Keyboard and text input require EIS with a compositor keyboard map. This legacy portal session supports pointer actions only.")
         # A new PipeWire connection verifies current negotiated geometry and
         # rejects stale frames after a monitor resize before the first event.
         self.capture(stream, ctx)
@@ -718,12 +720,6 @@ class Portal:
             self.notify("NotifyPointerButton", "(oa{sv}iu)", (code, 1 if pressed else 0), ctx)
             if not pressed:
                 self.held_buttons.remove(code)
-        def key(code, pressed):
-            if pressed:
-                self.held_keys.append(code)
-            self.notify("NotifyKeyboardKeysym", "(oa{sv}iu)", (code, 1 if pressed else 0), ctx)
-            if not pressed:
-                self.held_keys.remove(code)
         try:
             if kind == "move":
                 move(action["x"], action["y"])
@@ -752,15 +748,6 @@ class Portal:
                 self.notify("NotifyPointerAxisDiscrete", "(oa{sv}ui)",
                     (0 if direction in ("up", "down") else 1,
                      action.get("amount", 3) * (-1 if direction in ("up", "left") else 1)), ctx)
-            elif kind == "key":
-                for code in symbols:
-                    key(code, True)
-                for code in reversed(symbols):
-                    key(code, False)
-            elif kind == "text":
-                for code in symbols:
-                    key(code, True)
-                    key(code, False)
             ctx.sleep(0.02)
         finally:
             if not self.release_inputs():
