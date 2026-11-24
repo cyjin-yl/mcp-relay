@@ -324,7 +324,9 @@ async function main(): Promise<void> {
     process.stdout.write(JSON.stringify(receipt, null, 2) + "\n");
   } catch (error) {
     const failure = { ok: false, checks, observed, diagnostic,
-      error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : String(error) };
+      error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack,
+        code: "code" in error ? error.code : undefined,
+        details: "details" in error ? error.details : undefined } : String(error) };
     writeFileSync(join(evidence, "failure.json"), JSON.stringify(failure, null, 2) + "\n", { mode: 0o600 });
     process.stderr.write("Native failure: " + JSON.stringify(failure) + "\n");
     throw error;
