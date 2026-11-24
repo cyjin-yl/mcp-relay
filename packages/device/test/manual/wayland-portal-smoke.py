@@ -261,7 +261,7 @@ def consent(mode):
         nodes = portal_nodes()
         def button_named(node, expected):
             words = set((node.name or "").replace("_", "").strip().lower().split())
-            return words == {expected} and node.getRoleName() == "push button"
+            return words == {expected} and node.getRoleName() in ("push button", "button")
 
         share = [n for n in nodes if button_named(n, "share")]
         cancel = [n for n in nodes if button_named(n, "cancel")]
