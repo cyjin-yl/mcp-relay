@@ -59,6 +59,7 @@ class EisApi:
 class XkbKeyboard:
     def __init__(self, api, keymap):
         self.api, self.context, self.keymap, self.state = api, None, None, None
+        self.modifiers_known = False
         if api.xkb is None:
             raise Failure("eis_keymap_unsupported", "Install libxkbcommon for keyboard input. EIS pointer input remains available.")
         try:
@@ -98,11 +99,11 @@ class XkbKeyboard:
     def modifiers(self, values):
         depressed, latched, locked, group = values
         self.api.xkb.xkb_state_update_mask(self.state, depressed, latched, locked, 0, 0, group)
+        self.modifiers_known = True
 
     def own_key(self, code, pressed):
-        # Some compositor EIS versions supply a keymap but no modifier events.
-        # Retain ordered state for our own virtual keys, and replace masks when
-        # the server supplies them. This does not exclude concurrent local input.
+        # Track our ordered virtual key transitions between authoritative server
+        # snapshots. Keyboard use requires an initial modifier/layout snapshot.
         self.api.xkb.xkb_state_update_key(self.state, code + 8, 1 if pressed else 0)
 
     def neutralize(self):
@@ -114,6 +115,7 @@ class XkbKeyboard:
             raise Failure("eis_keymap_unsupported", "The paused keyboard state could not be reset.")
         self.api.xkb.xkb_state_update_mask(self.state, 0, 0, locked, 0, 0, group)
         self.api.xkb.xkb_state_unref(previous)
+        self.modifiers_known = False
 
     def mask(self):
         xkb = self.api.xkb
@@ -135,6 +137,8 @@ class XkbKeyboard:
         return None
 
     def plan(self, symbols, text=False):
+        if not self.modifiers_known:
+            raise Failure("keyboard_state_unavailable", "The compositor has not supplied the current keyboard modifiers and layout. Keyboard input is unavailable until EIS provides that state.")
         mask = self.mask()
         if mask[0] or mask[1]:
             raise Failure("keyboard_modifiers_active", "Release active keyboard modifiers before sending keyboard input.")
@@ -366,10 +370,10 @@ class EisInput:
 
     def device(self, capability, seat, preferred=None):
         if (preferred is not None and preferred["active"] and preferred["virtual"] and capability in preferred["caps"]
-                and (capability != 4 or preferred["keyboard"] is not None)):
+                and (capability != 4 or preferred["keyboard"] is not None and preferred["keyboard"].modifiers_known)):
             return preferred
         matches = [record for record in self.devices.values() if record["active"] and record["virtual"] and record["seat"] == seat and capability in record["caps"]
-                   and (capability != 4 or record["keyboard"] is not None)]
+                   and (capability != 4 or record["keyboard"] is not None and record["keyboard"].modifiers_known)]
         if len(matches) > 1:
             raise Failure("eis_device_ambiguous", "The compositor supplied multiple independent devices for this input capability.")
         return matches[0] if matches else None
@@ -420,7 +424,7 @@ class EisInput:
         self.check(ctx, generation, "keyboard-event")
         pointer = record["pointer"]
         if (self.devices.get(pointer) is not record or not record["active"]
-                or record["keyboard"] is None):
+                or record["keyboard"] is None or not record["keyboard"].modifiers_known):
             # Event processing may have unref'd the device and keyboard map.
             # Never dereference that old C state or replay an uncertain key.
             raise Failure("keyboard_changed", "The compositor keyboard changed during a key transaction; remaining input was stopped.", {"mayHaveApplied": True})

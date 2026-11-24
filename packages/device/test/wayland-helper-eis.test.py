@@ -47,7 +47,7 @@ class XkbPlanningTests(unittest.TestCase):
         cls.libc = original("libc.so.6")
         cls.libc.free.argtypes, cls.libc.free.restype = [ctypes.c_void_p], None
 
-    def keyboard(self, layout="us"):
+    def keyboard(self, layout="us", with_snapshot=True):
         context = self.api.xkb.xkb_context_new(0)
         keymap = self.api.xkb.xkb_keymap_new_from_names(context,
             ctypes.byref(RuleNames(None, None, layout.encode(), None, b"")), 0)
@@ -65,6 +65,8 @@ class XkbPlanningTests(unittest.TestCase):
         file.flush()
         self.descriptor.fd, self.descriptor.size = file.fileno(), len(data)
         keyboard = XkbKeyboard(self.api, 1)
+        if with_snapshot:
+            keyboard.modifiers((0, 0, 0, 0))
         self.addCleanup(keyboard.close)
         return keyboard
 
@@ -117,7 +119,33 @@ class XkbPlanningTests(unittest.TestCase):
         self.assertTrue(keyboard.mask()[0])
         keyboard.neutralize()
         self.assertEqual(keyboard.mask()[0], 0)
+        self.assertFalse(keyboard.modifiers_known)
+        keyboard.modifiers((0, 0, 0, 0))
         self.render_plan(keyboard, "Aa!")
+
+    def test_unknown_initial_modifiers_disable_keyboard_before_any_event(self):
+        keyboard = self.keyboard(with_snapshot=False)
+        instance = EisContracts.bare(self)
+        selected = EisContracts.record(self, 9)
+        record = EisContracts.record(self, 10, caps=(4,))
+        record["keyboard"] = keyboard
+        instance.devices = {9: selected, 10: record}
+        instance.region = lambda _: (selected, (0, 0, 800, 600))
+        instance.sync = lambda ctx: ctx.check()
+        streams = [{"mapping": "selected", "epoch": "session", "serial": 7, "node": 23,
+                    "display": {"id": "wayland:23", "width": 800, "height": 600, "rotation": 0}}]
+        self.assertEqual(instance.actions(streams), ["move", "click", "drag", "scroll"])
+        with self.assertRaises(Failure) as caught:
+            keyboard.plan([ord("A")], text=True)
+        self.assertEqual(caught.exception.code, "keyboard_state_unavailable")
+        instance.display(streams[0])
+        with self.assertRaises(Failure) as caught:
+            instance.act({"type": "text", "text": "Aa!"}, streams[0], dict(streams[0]["display"]),
+                         [65, 97, 33], Context(2000))
+        self.assertEqual(caught.exception.code, "input_unavailable")
+        self.assertEqual(instance.held, [])
+        keyboard.modifiers((0, 0, 0, 0))
+        self.assertEqual(instance.actions(streams), ["move", "click", "drag", "scroll", "key", "text"])
 
     def test_pause_then_resume_cannot_continue_a_shifted_character(self):
         keyboard = self.keyboard()

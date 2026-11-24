@@ -68,6 +68,7 @@ def fixture():
         "keyPresses": 0,
         "capsLock": None,
         "lastKeyCapsLock": None,
+        "devicePointer": None,
         "logicalWidth": 0,
         "logicalHeight": 0,
         "gdkScale": 1,
@@ -81,6 +82,15 @@ def fixture():
         state["gdkScale"] = window.get_scale_factor()
         keyboard = display.get_default_seat().get_keyboard()
         state["capsLock"] = keyboard.get_caps_lock_state() if keyboard is not None else None
+        pointer = display.get_default_seat().get_pointer()
+        state["devicePointer"] = None
+        if pointer is not None:
+            surface, x, y = pointer.get_surface_at_position()
+            # Read the actual Wayland client's pointer focus and coordinates.
+            # GTK 4.8's motion controller can retain contains-pointer across
+            # removal of the last seat device, suppressing a new enter signal.
+            if surface is not None and surface == window.get_surface():
+                state["devicePointer"] = [round(x, 2), round(y, 2)]
         serialized = json.dumps(state, sort_keys=True, ensure_ascii=False)
         if serialized != last:
             print(serialized, flush=True)

@@ -62,25 +62,31 @@ jobs:
             image: node:22-bookworm
             transport: gnome-legacy
             scale: 1
+            keyboard: 0
           - distribution: trixie
             image: node:22-trixie
             transport: eis
             scale: 1
+            keyboard: 0
           - distribution: trixie
             image: node:22-trixie
             transport: eis
             scale: 2
+            keyboard: 0
           - distribution: forky
             image: debian:forky-slim
             transport: eis
             scale: 1
+            keyboard: 1
           - distribution: forky
             image: debian:forky-slim
             transport: eis
             scale: 2
+            keyboard: 1
     env:
       RELAY_TEST_SCALE: ${{ matrix.scale }}
       RELAY_TEST_INPUT_TRANSPORT: ${{ matrix.transport }}
+      RELAY_TEST_KEYBOARD: ${{ matrix.keyboard }}
       RELAY_NATIVE_EVIDENCE_DIR: /tmp/relay-wayland-native
     steps:
       - name: Install modern distribution build runtime before checkout

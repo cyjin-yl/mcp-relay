@@ -14,6 +14,7 @@ type Observation = {
   scrollX: number; scrollY: number; buttons: number[]; keys: string[];
   pointerEntries: number; lastPointerEvent: "enter" | "motion";
   capsLock: boolean | null; lastKeyCapsLock: boolean | null; keyPresses: number;
+  devicePointer: [number, number] | null;
   logicalWidth: number; logicalHeight: number; gdkScale: number;
   lastPointer: [number, number];
 };
@@ -43,6 +44,8 @@ async function main(): Promise<void> {
   const expectedScale = Number(process.env.RELAY_TEST_SCALE ?? "1");
   const expectedTransport = process.env.RELAY_TEST_INPUT_TRANSPORT;
   assert.ok(expectedTransport === "eis" || expectedTransport === "gnome-legacy");
+  assert.ok(["0", "1"].includes(process.env.RELAY_TEST_KEYBOARD ?? ""));
+  const expectedKeyboard = process.env.RELAY_TEST_KEYBOARD === "1";
   let observed: Partial<Observation> = {};
   let diagnostic = "";
   let fixture: ChildProcessWithoutNullStreams | undefined;
@@ -89,6 +92,8 @@ async function main(): Promise<void> {
       assert.equal(state.inputKind, "mouse_keyboard", JSON.stringify(state));
       assert.equal(state.permissions.input, "granted");
       assert.equal(state.details?.inputTransport, expectedTransport, "The native job must exercise its assigned input transport");
+      assert.equal(state.actions.includes("key"), expectedKeyboard, "Keyboard capabilities must match the actual compositor protocol support");
+      assert.equal(state.actions.includes("text"), expectedKeyboard);
     } else {
       assert.equal(state.inputKind, "none", "Unsafe legacy mapping must preserve capture without exposing input");
       assert.notEqual(state.permissions.input, "granted");
@@ -196,7 +201,7 @@ async function main(): Promise<void> {
 
     await act({ type: "click", ...pixel(screen, 100, 40) }, screen);
     const ascii = "Relay 42 !@#:/[]{}?";
-    if (expectedTransport === "eis") {
+    if (expectedKeyboard) {
       assert.ok(state.actions.includes("key") && state.actions.includes("text"));
       await act({ type: "text", text: ascii }, screen);
       await until(() => observed.text === ascii, "Actual GTK entry receives uppercase and punctuation");
@@ -211,14 +216,15 @@ async function main(): Promise<void> {
         await assert.rejects(() => backend.act(action, screen, context()), { code: "keyboard_unavailable" });
       }
       await delay(150);
-      assert.equal(observed.text, "", "Unsupported legacy keyboard input must not alter the native GTK entry");
+      assert.equal(observed.text, "", "Unsupported keyboard input must not alter the native GTK entry");
       assert.deepEqual(observed.keys, []);
-      passed("legacy advertises pointer-only control and atomically refuses text and keyboard chords");
+      passed((expectedTransport === "eis" ? "EIS without initial modifier state" : "legacy") +
+        " advertises pointer-only control and atomically refuses text and keyboard chords");
     }
     assert.equal(state.unicodeText, false);
     await assert.rejects(() => backend.act({ type: "text", text: "partial中文" }, screen, context()));
     await delay(100);
-    assert.equal(observed.text, expectedTransport === "eis" ? "replacement" : "", "Unsupported text must not be partially entered");
+    assert.equal(observed.text, expectedKeyboard ? "replacement" : "", "Unsupported text must not be partially entered");
     passed("unsupported Unicode is refused before partial text input");
 
     await act({ type: "click", ...pixel(screen, 100, 100) }, screen);
@@ -270,8 +276,8 @@ async function main(): Promise<void> {
     drags = observed.drags;
     await act({ type: "move", ...pixel(current.display, 550, 390) }, current.display);
     await screenshot("after-helper-crash-move");
-    await until(() => Boolean(observed.lastPointer) && Math.abs(observed.lastPointer![0] - 550) <= 2 &&
-      Math.abs(observed.lastPointer![1] - 390) <= 2, "Native GTK verifies a pointer target beyond half the physical image at scale2");
+    await until(() => Boolean(observed.devicePointer) && Math.abs(observed.devicePointer![0] - 550) <= 2 &&
+      Math.abs(observed.devicePointer![1] - 390) <= 2, "Native GDK pointer focus verifies the target beyond half the physical image at scale2");
     const motionBeforeReleaseCheck = Number(observed.motion);
     await act({ type: "move", ...pixel(current.display, 560, 400) }, current.display);
     await until(() => Number(observed.motion) > motionBeforeReleaseCheck && observed.lastPointerEvent === "motion" &&
@@ -333,7 +339,7 @@ async function main(): Promise<void> {
       ? "EIS reauthorization maps real input correctly at the newly applied compositor scale"
       : "explicit reauthorization at supported legacy scale1 restores actual native input");
 
-    if (expectedTransport === "eis") {
+    if (expectedKeyboard) {
       await act({ type: "click", ...pixel(current.display, 100, 40) }, current.display);
       await act({ type: "key", keys: ["Control_L", "a"] }, current.display);
       await act({ type: "key", keys: ["Backspace"] }, current.display);
@@ -378,6 +384,7 @@ async function main(): Promise<void> {
 
     const receipt = { ok: true, backend: backend.id, checks, observed, display: screen, layouts, probes,
       inputTransport: expectedTransport,
+      keyboard: expectedKeyboard,
       sourceRevision: process.env.GITHUB_SHA ?? null,
       harnessSha256: createHash("sha256").update(readFileSync(process.argv[1]!)).digest("hex"),
       fixtureSha256: createHash("sha256").update(readFileSync(fixtureScript)).digest("hex"),

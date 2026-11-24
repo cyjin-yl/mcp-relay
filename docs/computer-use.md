@@ -229,7 +229,7 @@ depends on the desktop's available mapping protocol:
 
 | Desktop capability | Input behavior |
 | --- | --- |
-| RemoteDesktop EIS connection and ScreenCast monitor mapping IDs, with a compatible libei and libxkbcommon | Each shared monitor must match one live EIS region. Screenshot pixels map to that region's coordinates, including scaled monitors. Device replacement or region changes invalidate prior frames. The compositor supplies the keyboard map. |
+| RemoteDesktop EIS connection and ScreenCast monitor mapping IDs, with a compatible libei | Each shared monitor must match one live EIS region. Screenshot pixels map to that region's coordinates, including scaled monitors. Device replacement or region changes invalidate prior frames. Keyboard input additionally requires libxkbcommon, the compositor's keyboard map, and an authoritative initial modifier/layout snapshot. |
 | Older GNOME portal without usable EIS | Pointer actions are limited to unrotated monitors at scale 1. Relay freezes the read-only Mutter DisplayConfig state before consent, binds the selected streams to that unchanged layout, and checks the owner, serial and layout before each input event. A display change requires fresh setup. Keyboard and text actions are unavailable because this protocol does not supply the compositor keymap and modifier state needed for reliable text. |
 | Other authorized capture with no reliable input mapping | Screenshots remain available; input is disabled and `computer_info` explains the missing capability. |
 
@@ -239,7 +239,9 @@ falls back to legacy Notify input within that permission session. `computer_info
 reports the active transport in `details.inputTransport`. The helper does not
 change monitor settings, keyboard layouts or desktop permission databases.
 Pointer and keyboard capabilities are reported separately in `actions`; an absent
-or unsupported keyboard map does not imply that keyboard input is available.
+or unsupported keyboard map, or missing initial modifier state, leaves keyboard
+input unavailable while working pointer actions remain enabled. This also prevents
+a pre-existing Caps Lock state from silently changing the requested text's case.
 On older ScreenCast portals that do not supply a stable PipeWire stream serial,
 an observed monitor or capture-geometry change closes the grant. Run setup again
 before capturing or acting, so a reused PipeWire node ID cannot become an old

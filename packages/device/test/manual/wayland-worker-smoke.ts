@@ -38,6 +38,7 @@ async function main(): Promise<void> {
     harnessSha256: createHash("sha256").update(readFileSync(process.argv[1]!)).digest("hex"),
     sourceRevision: process.env.GITHUB_SHA ?? null, runId: process.env.GITHUB_RUN_ID ?? null,
     scale: Number(process.env.RELAY_TEST_SCALE), transport: process.env.RELAY_TEST_INPUT_TRANSPORT,
+    keyboardExpected: process.env.RELAY_TEST_KEYBOARD === "1",
     startedAt: new Date().toISOString() };
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise<void>((done, reject) => { server.once("listening", done); server.once("error", reject); });
@@ -189,7 +190,7 @@ async function main(): Promise<void> {
     await frame("after-click");
     passed("CLI input changes native pixels; duplicate requests and consumed frames do not replay it");
 
-    if (report.transport === "eis") {
+    if (report.keyboardExpected) {
       assert(state.actions.includes("text"));
       await act({ type: "click", ...point(100, 40) });
       await act({ type: "text", text: "Pack 42 !@#:/[]{}?" });
@@ -202,7 +203,7 @@ async function main(): Promise<void> {
         action: { type: "text", text: "Must Not Type!" } });
       assert.equal(refused.isError, true); assert.equal(data(refused).code, "unsupported_action");
       assert.equal(observed.text, "");
-      passed("legacy keyboard capability is refused by the actual computer pack without input");
+      passed("unavailable keyboard capability is refused by the actual computer pack without input");
     }
 
     success(await call("computer_handoff", { mode: "pause" }));

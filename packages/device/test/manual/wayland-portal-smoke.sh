@@ -69,7 +69,9 @@ PORTALS
 dbus-update-activation-environment XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME \
   XDG_SESSION_TYPE XDG_CURRENT_DESKTOP WAYLAND_DISPLAY GDK_BACKEND GTK_A11Y \
   NO_AT_BRIDGE LIBGL_ALWAYS_SOFTWARE GSK_RENDERER LANG LC_ALL
-gsettings set org.gnome.mutter experimental-features "['scale-monitor-framebuffer']"
+if gsettings list-keys org.gnome.mutter | rg -qx experimental-features; then
+  gsettings set org.gnome.mutter experimental-features "['scale-monitor-framebuffer']"
+fi
 
 unset DISPLAY
 relay_mutter_args=(--headless --wayland --no-x11 --wayland-display="$WAYLAND_DISPLAY" \
