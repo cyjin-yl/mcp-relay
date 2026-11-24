@@ -60,6 +60,8 @@ The native lease lasts ten seconds and is renewed by bounded liveness calls. The
 
 On close, disconnect, expiry or owner death, the guardian revokes the agent's native input lease, switches the viewer to view-only, and shows the retained viewer on the parent session's current primary screen without activating it. The applications remain in the child session. HWNDs are not moved between sessions, and the viewer is the recovery handoff.
 
+To continue using those applications, the user clicks **Take control** in the viewer's top toolbar. Its status changes from **View only** to **You have control**, and the user's mouse and keyboard can interact with the same retained child session and applications. **Release control** returns the viewer to view-only. This explicit local action does not restore the revoked agent lease or create a new session. If the viewer has disconnected, its **Reconnect** or **Sign in…** action reconnects to the retained session while its applications keep running; Windows may require native sign-in again.
+
 Only a verified failed startup with no child session or child host may be dismissed automatically. That path calls quit only on the exact owned --keep Anode process. A successful workspace is never logged off or killed during recovery. Ambiguous ownership or incomplete input revocation reports cleanup-pending and remains guarded.
 
 ## Native validation and user handoff
