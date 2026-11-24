@@ -1,9 +1,11 @@
-# Native computer use — device 0.1.9
+# Native computer use — device 0.1.11
 
 The optional computer pack adds computer_info, computer_screenshot, computer_action,
 computer_handoff, and computer_setup. Screenshots are native MCP PNG image blocks,
 with metadata kept separate from base64 image content. Action, handoff, and setup
 always require relay.write, even if a device incorrectly marks them read-only.
+
+Release evidence, native platform checks and actual installed Android acceptance are recorded in [the 0.1.11 verification report](VERIFICATION_20261124_0_1_11.md).
 
 ## Enablement and local controls
 
@@ -118,6 +120,18 @@ UTF-8 text is transported as base64 and committed through the active InputConnec
 The original selected/enabled IME state is restored in cleanup. The exact request ID
 must be acknowledged. input text is not used as a pretend Unicode implementation.
 
+Android coordinate input requires consistent current default-display geometry and rotation.
+Base display dimensions or embedded Configuration rotation fields do not override the
+current display state. When that state cannot be established, capture remains observable
+and coordinate actions are refused; inspect the reported capabilities before input.
+
+Every Android action retains the application identity from its screenshot. After su
+returns, the privileged input session must confirm the same default-display component
+in consecutive observations. Text checks again after selecting the temporary IME.
+A different or unverified target stops input; a later probe cannot retarget the action.
+Bridge failures expose only bounded, exact-request status categories, and uncertain
+input is not replayed.
+
 MCP setup failures identify preflight, install, or verification. A failed verification
 after installation remains mayHaveApplied=true. Only bounded package-manager
 failure codes or static diagnostic categories are returned; native output and
@@ -149,6 +163,11 @@ Actions are move (x/y), click (x/y, optional button/clicks), drag
 (fromX/fromY/toX/toY/durationMs), scroll (direction, optional amount and x/y),
 key (keys array such as ["Ctrl","a"]), and text (text without automatic Enter).
 Android combinations require native keycombination support.
+
+Scroll amount is an integer number of steps from 1 through 40; the default is 3.
+On Android each step becomes a 120-pixel swipe distance in the screenshot coordinate
+grid, bounded to 75% of the selected screen axis. Other backends deliver native
+wheel/line steps, so the visible distance still depends on the target application.
 
 Coordinates are actual screenshot pixels, including on Retina/high-DPI screens.
 The backend converts to native input units. Frames expire after two minutes.

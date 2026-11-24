@@ -1,5 +1,7 @@
 # Verification: computer use 0.1.8
 
+Historical record as observed during the 0.1.8 publication and initial rollout. Later release and device state are recorded in [the 0.1.10 follow-up](VERIFICATION_20261123_0_1_10.md).
+
 The final client and native harness passed acceptance, and **0.1.8 was published to the stable HTTPS channel on 2026-11-23 at 20:14:55 UTC**. An independent Node download verification completed at 20:15:11 UTC. Physical device installation and native capability acceptance remain separate gates.
 
 Review: https://github.com/cyjin-yl/mcp-relay/pull/4. The feature builds on the Windows/supervised-update work in #3.
@@ -39,7 +41,7 @@ Android backend tests and signed APK build/signature checks passed. Subsequent p
 
 ### Exact source association
 
-The v4b build captured **65 complete source/test/workflow/configuration inputs** before and after execution. The maps were identical. Its receipt is:
+The v4b build captured **65 source/test/workflow/configuration inputs** before and after execution. The captured maps were identical. This historical collection was not exhaustive: the later 0.1.10 gate also records the actual root TypeScript/Vitest configurations and added C/Python fixtures. Its receipt is:
 
 `.tmp/computer-final-v4b-artifacts.json`
 
@@ -75,7 +77,7 @@ Client publication uses immutable version files, exact digest/length checks, a r
 
 ## Publication and device rollout
 
-**Stable publication is complete and independently verified.** The live stable manifest is version 0.1.8, CLI SHA `fc83a4f1e9c790c627c10b3752608a2dd6a72e1c6595f310b700698388bbc64c`, manifest-file SHA `5b05a6dc1730ade25be392f7f2cfd77bb669aa4b7a4fe1766c206741db65c041`.
+**Stable publication is complete and independently verified.** The publication verification observed stable version 0.1.8, CLI SHA `fc83a4f1e9c790c627c10b3752608a2dd6a72e1c6595f310b700698388bbc64c`, manifest-file SHA `5b05a6dc1730ade25be392f7f2cfd77bb669aa4b7a4fe1766c206741db65c041`.
 
 The approved plan hashes to `adf8ff0c6a8ba1c0fd62df6c9636401d7ee1c2147127d20c1808aa8397cb255d`. The transaction completed healthy with exit 0 and no rollback; it did not signal workers or restart services. Go `64439d3e...2423ddfc` and the Caddy configuration remained unchanged. The independent CT102 Node verifier fetched the live stable manifest and all three versioned artifacts, obtaining HTTP 200, no-store headers, and the exact expected bytes and SHA-256 values.
 

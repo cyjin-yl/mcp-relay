@@ -23,7 +23,7 @@ These changes correct the error contract. They do not turn the original native e
 
 The CT102 full gate ran from 21:10:58 to 21:12:01 UTC on 2026-11-23. Typecheck, all three fresh builds, three syntax checks, and **179 automated tests in 22 files** passed. The test run took 55.03 seconds. The desktop harness was rebuilt and produced the same bytes as the accepted 0.1.8 harness.
 
-The gate captured **66 complete source/test/workflow/configuration inputs** before and after; the raw maps were identical. This release explicitly includes `packages/device/manual/android-computer-smoke.ts` in that input collection. All current inputs were checked against the maps again before candidate upload and before the source commit.
+The gate captured **66 source/test/workflow/configuration inputs** before and after; the captured maps were identical. This historical collection did not include the root TypeScript/Vitest configurations; the later 0.1.10 gate includes those and the added C/Python fixtures. This release explicitly includes `packages/device/manual/android-computer-smoke.ts` in that input collection. Every captured input was checked against the maps again before candidate upload and before the source commit.
 
 - Full-gate receipt: `.tmp/computer-final-0.1.9-v1-artifacts.json`, SHA `7ab5fb19052d0ee7658ac26b6cbddb73205db071883600ee8d932a4289e0dda6`.
 - Raw log, exit, before and after files share prefix `.tmp/computer-release-gate-0.1.9-v1`.
@@ -62,7 +62,7 @@ Native verification: `.tmp/native-ci-45267679272/verification.json`, SHA `213e71
 
 The candidate approved plan was `.tmp/release-promotion-0.1.9/plan-approved-9d25-h210706-native45267679272.json`, SHA `ff1984fd18cd0702d568e8447e0a0f5e31919a54d38b721fa6d4835d09bb3cec`; it is stopped and must not be reused by merely changing its old-pointer guard. The diagnostic receipt is `.tmp/release-promotion-0.1.9/preflight-ff1984-diagnostic.json`, SHA `5282133c8f7de2bf5de2cebc061ae12a18292ae2c0a8586001421fd469fe93b8`.
 
-Concurrent artifact provenance and source compatibility are being reconciled before assigning a fresh version. Go `64439d3e6a0c02bbbd8f380a3df83dc8f10b14c51054c7f0983baa3f2423ddfc` and Caddy `a7b13d09bb33a3d3c8af52403e09d49e1a5a55b44472302c1e95be83c98a017d` remain unchanged.
+Concurrent artifact provenance and source compatibility were subsequently reconciled; the merged follow-up is documented in [the 0.1.10 verification report](VERIFICATION_20261123_0_1_10.md). This candidate remains unpublished. Go `64439d3e6a0c02bbbd8f380a3df83dc8f10b14c51054c7f0983baa3f2423ddfc` and Caddy `a7b13d09bb33a3d3c8af52403e09d49e1a5a55b44472302c1e95be83c98a017d` remain unchanged.
 <!-- PUBLICATION-STATUS-END -->
 
 ## Actual devices and automatic follow-up
