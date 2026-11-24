@@ -137,7 +137,7 @@ async function main(): Promise<void> {
       "--packs", "minimal,omp", "--no-auto-update"], {
       execArgv: [], windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
       env: { ...process.env, MCP_RELAY_WORKER: "1", MCP_RELAY_START_DRAINED: "0",
-        MCP_RELAY_SUPERVISOR: "0", MCP_RELAY_LAUNCHED: "0", MCP_RELAY_SMOKE_SECRET: "must-not-forward" }
+        MCP_RELAY_SUPERVISOR: "0", MCP_RELAY_LAUNCHED: "0", COMPUTERNAME: hostname(), MCP_RELAY_SMOKE_SECRET: "must-not-forward" }
     });
     worker.stderr!.on("data", (data: Buffer) => { workerLog = (workerLog + data.toString()).slice(-64000); });
     worker.stdout!.on("data", (data: Buffer) => { workerLog = (workerLog + data.toString()).slice(-64000); });
@@ -157,7 +157,7 @@ async function main(): Promise<void> {
     });
     await check("Unicode, quotes, cwd and environment filtering", async () => {
       const result = await call("powershell", { cwd: "中文 子目录", command:
-        "[pscustomobject]@{unicode='中文🙂 \"quoted\"';root=(Get-Location).Path;version=$PSVersionTable.PSVersion.ToString();marker=$env:MCP_RELAY;secret=$env:MCP_RELAY_SMOKE_SECRET}|ConvertTo-Json -Compress" });
+        "[pscustomobject]@{unicode='中文🙂 \"quoted\"';root=(Get-Location).Path;version=$PSVersionTable.PSVersion.ToString();marker=$env:MCP_RELAY;computer=$env:COMPUTERNAME;identity=[Security.Principal.WindowsIdentity]::GetCurrent().Name;machine=[Environment]::MachineName;secret=$env:MCP_RELAY_SMOKE_SECRET}|ConvertTo-Json -Compress" });
       assert.notEqual(result.isError, true, text(result));
       const object = JSON.parse(stdout(result));
       assert.equal(object.unicode, '中文🙂 "quoted"');
@@ -165,6 +165,9 @@ async function main(): Promise<void> {
       // Compare the actual filesystem identity without relaxing the cwd boundary.
       assert.equal(realpathSync.native(object.root).toLowerCase(), realpathSync.native(subdir).toLowerCase());
       assert.equal(object.marker, "1");
+      assert.equal(object.computer.toLowerCase(), hostname().toLowerCase());
+      assert.equal(object.machine.toLowerCase(), hostname().toLowerCase());
+      assert.equal(typeof object.identity, "string");
       assert(!object.secret);
     });
     await check("native executable nonzero exit code is preserved", async () => {

@@ -1,0 +1,93 @@
+name: Isolated workspace lifecycle
+
+on:
+  push:
+    branches: [main, 'fix/**']
+    paths:
+      - '.github/workflows/computer-workspace-smoke.yml'
+      - 'packages/device/src/computer/**'
+      - 'packages/device/src/packs/computer.ts'
+      - 'packages/device/src/connection.ts'
+      - 'packages/device/src/pack.ts'
+      - 'packages/shared/**'
+      - 'packages/device/test/**'
+      - 'packages/android-workspace/**'
+      - 'scripts/build-linux-workspace-tests.mjs'
+      - 'server/**'
+  pull_request:
+    paths:
+      - 'packages/device/src/computer/**'
+      - 'packages/device/src/packs/computer.ts'
+      - 'packages/device/src/connection.ts'
+      - 'packages/shared/**'
+      - 'packages/device/test/**'
+      - 'packages/android-workspace/**'
+      - 'server/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: isolated-workspace-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    name: Linux native isolation and recovery
+    runs-on: ubuntu-latest
+    container: node:22-bookworm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install native test desktop
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            xpra xvfb xauth xdotool x11-utils openbox xterm imagemagick python3-xlib python3-pil
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - name: Check ownership, transport, updater and mode separation
+        run: npm test -- --maxWorkers=2
+      - name: Run real private and physical X11 servers
+        run: |
+          node scripts/build-linux-workspace-tests.mjs
+          relay_smoke_exit=0
+          node release/linux-workspace-smoke.cjs > /tmp/linux-workspace-native.log 2>&1 || relay_smoke_exit=$?
+          cat /tmp/linux-workspace-native.log
+          exit "$relay_smoke_exit"
+      - name: Collect bounded native evidence
+        if: always()
+        run: |
+          mkdir -p release/workspace-evidence
+          node --input-type=module <<'NODE'
+          import { readdirSync, existsSync, copyFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          if (existsSync('/tmp/linux-workspace-native.log')) copyFileSync('/tmp/linux-workspace-native.log', 'release/workspace-evidence/native.log');
+          for (const name of readdirSync('/tmp').filter(x => x.startsWith('relay-linux-workspace-'))) {
+            const file = join('/tmp', name, 'receipt.json');
+            if (existsSync(file)) copyFileSync(file, join('release/workspace-evidence', name + '.json'));
+          }
+          NODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: linux-workspace-native
+          path: release/workspace-evidence
+          if-no-files-found: error
+
+  server:
+    name: Server owner identity and revoke
+    runs-on: ubuntu-latest
+    container: golang:1.27
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: go test ./...

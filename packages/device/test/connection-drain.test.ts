@@ -1,6 +1,6 @@
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
 import { runConnection, type ConnectionControl, type SupervisorMessage, type WorkerMessage } from "../src/connection.js";
 import { textResult, type ToolPack } from "../src/pack.js";
@@ -54,9 +54,9 @@ async function fixture(pack: ToolPack, startPaused = false) {
   return {
     ipc, running, send, received,
     ready() { send({ type: "hello_ack", deviceId: "test-device", slug: "test-device", serverTime: Date.now() }); },
-    call(id: string, timeoutMs = 1000) {
+    call(id: string, timeoutMs = 1000, extra: Record<string, unknown> = {}) {
       const result = new Promise<any>((resolve) => responses.set(id, resolve));
-      send({ type: "call", id, tool: "work", args: {}, timeoutMs });
+      send({ type: "call", id, tool: "work", args: {}, timeoutMs, ...extra });
       return result;
     },
     async cleanup() {
@@ -218,4 +218,55 @@ it("holds shutdown open until an aborted non-cooperative operation has actually 
     await running;
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+it("passes authenticated caller metadata and aborts the connection epoch independently of an individual call", async () => {
+  let observed: import("../src/pack.js").PackContext | undefined;
+  const closed = vi.fn(), disposed = vi.fn(async () => {});
+  const f = await fixture({ id: "computer", tools: [{ name: "work", description: "test", inputSchema: { type: "object" } }],
+    connectionClosed: closed, dispose: disposed,
+    async call(_name, _args, context) { observed = context; return textResult("observed"); } });
+  f.ready(); await f.ipc.wait("relay:ready");
+  const caller = { ownerKey: "server-authenticated-owner", authorizationExpiresAt: Date.now() + 60000 };
+  await f.call("caller-context", 1000, { caller });
+  expect(observed?.caller).toEqual(caller);
+  expect(observed?.connection?.authenticated).toBe(true);
+  expect(observed?.connection?.signal.aborted).toBe(false);
+  const epoch = observed!.connection!.epoch;
+  await f.cleanup();
+  expect(observed?.connection?.authenticated).toBe(false);
+  expect(observed?.connection?.signal.aborted).toBe(true);
+  expect(closed).toHaveBeenCalledOnce(); expect(closed).toHaveBeenCalledWith(epoch);
+  expect(disposed).toHaveBeenCalledOnce();
+});
+
+it("delivers owner revocation while another tool still occupies the write lane", async () => {
+  const started = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>(), revoked = Promise.withResolvers<string>();
+  const f = await fixture({ id: "computer", tools: [{ name: "work", description: "test", inputSchema: { type: "object" } }],
+    async revokeWorkspaceOwner(ownerKey) { revoked.resolve(ownerKey); },
+    async call() { started.resolve(); await finish.promise; return textResult("finished"); } });
+  try {
+    f.ready(); await f.ipc.wait("relay:ready");
+    const result = f.call("active-input");
+    await started.promise;
+    f.send({ type: "workspace_revoke", ownerKey: "revoked-owner" });
+    expect(await revoked.promise).toBe("revoked-owner");
+    finish.resolve(); await result;
+  } finally { finish.resolve(); await f.cleanup(); }
+});
+
+it("defers an update while isolated workspace cleanup is pending and permits it after closure", async () => {
+  let pending = true;
+  const f = await fixture({ id: "computer", tools: [],
+    updateBlockedReason: () => pending ? "isolated workspace cleanup pending" : undefined,
+    async call() { return textResult(""); } });
+  try {
+    f.ready(); await f.ipc.wait("relay:ready");
+    f.ipc.send({ type: "relay:drain", requestId: "workspace-update" });
+    expect(await f.ipc.wait("relay:drain-deferred")).toMatchObject({ requestId: "workspace-update", reason: "isolated workspace cleanup pending" });
+    expect(f.ipc.messages.some(message => message.type === "relay:drained")).toBe(false);
+    pending = false;
+    f.ipc.send({ type: "relay:drain", requestId: "after-cleanup" });
+    expect(await f.ipc.wait("relay:drained")).toMatchObject({ requestId: "after-cleanup" });
+  } finally { await f.cleanup(); }
 });

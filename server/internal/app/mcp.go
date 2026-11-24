@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const mcpInstructions = "mcp-relay exposes tools on the user's online devices. Call devices_list first; it returns each device id and slug. If a device's d_<slug>__* tools are not in this conversation's tool list, call device_tools_list then device_call({device,tool,arguments}) using the id or slug. Read-only targets need relay.read; writes need relay.write. Do not assume devices share a filesystem. Use omp_hash before omp_apply_patch."
+const mcpInstructions = "mcp-relay exposes tools on the user's online devices. Call devices_list first; it returns each device id and slug. If a device's d_<slug>__* tools are not in this conversation's tool list, call device_tools_list then device_call({device,tool,arguments}) using the id or slug. Read-only targets need relay.read; writes need relay.write. Do not assume devices share a filesystem. Use omp_hash before omp_apply_patch. Computer use offers both foreground and isolated targets: omit lease_id to operate the user's current programs; for a private workspace, call computer_session with operation open and mode isolated, then pass its lease_id to computer_info, computer_screenshot and computer_action. Choose the mode to match the user's intent. Renew isolated leases explicitly and close them when finished. An unavailable or expired isolated workspace must never silently fall back to foreground input. computer_setup with workspace:true installs only the isolated runtime."
 
 var supportedProtocols = []string{"2025-11-25", "2025-06-18", "2025-03-26"}
 

@@ -20,9 +20,9 @@ function Save-Json([string]$Path, $Object) {
         [IO.File]::Replace($temporary, $Path, ($Path + '.previous-' + [Guid]::NewGuid().ToString('N')))
     } else { [IO.File]::Move($temporary, $Path) }
 }
-$report = [ordered]@{ schemaVersion=1; passed=$false; computerName=$env:COMPUTERNAME; startedAt=[DateTime]::UtcNow.ToString('o') }
+$report = [ordered]@{ schemaVersion=1; passed=$false; computerName=[Environment]::MachineName; startedAt=[DateTime]::UtcNow.ToString('o') }
 try {
-    if ($env:COMPUTERNAME -ine $ExpectedComputerName) { throw 'Unexpected computer identity; no test processes started' }
+    if ([Environment]::MachineName -ine $ExpectedComputerName) { throw 'Unexpected computer identity; no test processes started' }
     if ($NodePath -match '[\\/]fnm_multishells[\\/]') { throw 'Use the stable Node installation, not an ephemeral fnm multishell path' }
     foreach ($path in @($NodePath,$BundlePath,$HarnessPath)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw ('Required file is unavailable: ' + $path) }

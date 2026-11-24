@@ -53,6 +53,11 @@ it("preserves Windows runtime paths case-insensitively without forwarding secret
     Temp: "C:\\Users\\测试\\Temp",
     PATHEXT: ".EXE;.CMD",
     PSModuleAnalysisCachePath: "C:\\Users\\测试\\Cache\\ModuleAnalysisCache",
+    ComputerName: "TB14P-EZRA",
+    UserName: "ezra",
+    UserDomain: "TB14P-EZRA",
+    HomeDrive: "C:",
+    HomePath: "\\Users\\ezra",
     NPM_TOKEN: "do-not-forward",
     AWS_SECRET_ACCESS_KEY: "do-not-forward",
     NODE_OPTIONS: "--require unsafe",
@@ -63,6 +68,11 @@ it("preserves Windows runtime paths case-insensitively without forwarding secret
   expect(env.SYSTEMROOT).toBe("C:\\Windows");
   expect(env.USERPROFILE).toBe("C:\\Users\\测试");
   expect(env.TEMP).toBe("C:\\Users\\测试\\Temp");
+  expect(env.COMPUTERNAME).toBe("TB14P-EZRA");
+  expect(env.USERNAME).toBe("ezra");
+  expect(env.USERDOMAIN).toBe("TB14P-EZRA");
+  expect(env.HOMEDRIVE).toBe("C:");
+  expect(env.HOMEPATH).toBe("\\Users\\ezra");
   expect(env.PSMODULEANALYSISCACHEPATH).toBe("C:\\Users\\测试\\Cache\\ModuleAnalysisCache");
   expect(shellEnvironment("win32", {}).PSMODULEANALYSISCACHEPATH).toBeUndefined();
   expect(Object.keys(env).filter((key) => key.toLowerCase() === "path")).toHaveLength(1);
@@ -111,6 +121,7 @@ it("passes Unicode and quotes to PowerShell without cmd.exe and decodes split UT
   const argv = args as string[];
   expect(argv).toContain("-NoProfile");
   expect(argv).toContain("-NonInteractive");
+  expect(argv[argv.indexOf("-WindowStyle") + 1]).toBe("Hidden");
   const decoded = Buffer.from(argv[argv.indexOf("-EncodedCommand") + 1]!, "base64").toString("utf16le");
   expect(decoded).toContain(command);
   expect(decoded).toContain("[Console]::OutputEncoding");

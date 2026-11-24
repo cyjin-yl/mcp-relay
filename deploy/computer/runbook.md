@@ -1,12 +1,14 @@
-# Computer use 0.1.11：受管设备启用与验收
+# Computer use 0.1.12：受管设备启用与验收
 
-本手册供已有授权的部署任务使用。目标是让已有支持 OTA 的受管设备经正常更新升到 0.1.11，再启用 computer pack；不重新配对，不替换设备凭据，不清空 kernel。发布、设备在线、版本就绪、功能启用、实际工具验收是不同状态，必须分别记录。
+本手册供已有授权的部署任务使用。目标是让已有支持 OTA 的受管设备经正常更新升到 0.1.12，再启用 computer pack；不重新配对，不替换设备凭据，不清空 kernel。发布、设备在线、版本就绪、功能启用、实际工具验收是不同状态，必须分别记录。
 
 适用于 Linux（包括 PVE 宿主上的本机 QEMU VM）、Windows、macOS，以及已有授权 `su` 的 Android。平台能力和限制见 [computer-use.md](../../docs/computer-use.md)，OTA 恢复约定见 [WINDOWS_AND_UPDATES.md](../../docs/WINDOWS_AND_UPDATES.md)。Android 桥和自有测试界面见 [Android input README](../../packages/android-input/README.md)。
 
 ## 1. 准备发布与已有设备入口
 
-发布者先完成最终源码验证和平台原生验收，固定版本化 CLI、SHA-256 和对应 harness，再发布版本化文件，最后原子更新受信 HTTPS stable manifest。具体流程见 [0.1.11 verification and publication](../../docs/VERIFICATION_20261124_0_1_11.md)。验收记录中的摘要必须来自最终发布回执，不能沿用早期 CI 候选的摘要。设备 updater 会验证 HTTPS 同源、下载摘要、Node 语法、导入、版本和认证注册；Node 需至少 22.5。
+本次为 Windows updater、无窗口启动和隔离 Computer Use 的合并版本。先核对本次正式发布回执及其真实发布状态；候选源码、构建成功或某个平台已通过，不等于 stable/npm 已发布。新 Go 服务的调用者身份与撤销协议、固定 Windows runtime 的公开下载验签和完整原生回收验收必须先完成。旧版自动接续任务在迁移前也必须纳入单一执行者盘点，不能另起一个竞争迁移器。
+
+发布者先完成最终源码验证和平台原生验收，固定版本化 CLI、SHA-256 和对应 harness，再发布版本化文件，最后原子更新受信 HTTPS stable manifest。更新机制见 [Windows and online updates](../../docs/WINDOWS_AND_UPDATES.md)。本次正式回执应包含最终版本、工件摘要、原生验收和 stable/npm 的独立读回，发布前准备记录不能替代这些结果。验收记录中的摘要必须来自最终发布回执，不能沿用早期 CI 候选的摘要。设备 updater 会验证 HTTPS 同源、下载摘要、Node 语法、导入、版本和认证注册；Node 需至少 22.5。
 
 每台设备的部署任务记录以下非秘密信息：
 
@@ -17,11 +19,11 @@
 
 不要记录 token、配对码、config 正文、用户输入文本或 PNG base64。保留原 launcher/Termux 环境；不要另起一个同身份 worker 来“试一下”。
 
-**管理命令必须用新版 CLI。** OTA 后旧 bootstrap/launcher 文件仍可能显示旧版本；它的 `connect` 可以选择新版 supervisor，但旧文件并不会把 `computer-enable` 等新子命令转发给新版。使用已验证的 0.1.11 bundle 的绝对路径，并先确认：
+**管理命令必须用新版 CLI。** OTA 后旧 bootstrap/launcher 文件仍可能显示旧版本；它的 `connect` 可以选择新版 supervisor，但旧文件并不会把 `computer-enable` 等新子命令转发给新版。使用已验证的 0.1.12 bundle 的绝对路径，并先确认：
 
 ```sh
-node /absolute/path/to/verified-0.1.11/cli.cjs --version
-node /absolute/path/to/verified-0.1.11/cli.cjs update-status --config /absolute/path/to/device.json
+node /absolute/path/to/verified-0.1.12/cli.cjs --version
+node /absolute/path/to/verified-0.1.12/cli.cjs update-status --config /absolute/path/to/device.json
 ```
 
 下面所有 `CLI` 均指这个新版文件，`CONFIG` 指同一设备实际使用的 config。Windows 可在 PowerShell 中使用绝对路径调用 `node.exe`，参数含义相同。
@@ -62,7 +64,7 @@ node "$CLI" update-check --config "$CONFIG"
 node "$CLI" update-status --config "$CONFIG"
 ```
 
-观察 `version=0.1.11`、`supervisorVersion=0.1.11`、目标 SHA、`phase=running`，再核对一次新的设备注册或真实工具回调。短暂断线属于最终切换过程；不要因为 WebSocket 刚重连便断言热更新通过。
+观察 `version=0.1.12`、`supervisorVersion=0.1.12`、目标 SHA、`phase=running`，再核对一次新的设备注册或真实工具回调。短暂断线属于最终切换过程；不要因为 WebSocket 刚重连便断言热更新通过。
 
 遇到以下状态保留任务并等待：
 
@@ -75,7 +77,7 @@ node "$CLI" update-status --config "$CONFIG"
 | candidate 未就绪、摘要错误或启动失败 | 读取失败/回退原因，保留已验证旧版；遵守失败摘要冷却，不循环强制重试。 |
 | 暂无交互桌面、已锁屏、权限未知或不足 | 记录 blocked/unknown。不要模拟解锁、自动接受权限或改变系统授权策略。 |
 
-已在 0.1.7 supervisor 上排队的 `update-check` 仍有用；**本地 safe reload 从 0.1.8 supervisor 起可用**。若先用已验证的新 CLI 写了 enable sidecar，0.1.7 supervisor 不会自行理解 reload 文件；之后正常 OTA 启动的 0.1.11 worker 会读取 sidecar，新的 supervisor 会消费启动前已有的请求。
+已在 0.1.7 supervisor 上排队的 `update-check` 仍有用；**本地 safe reload 从 0.1.8 supervisor 起可用**。若先用已验证的新 CLI 写了 enable sidecar，0.1.7 supervisor 不会自行理解 reload 文件；之后正常 OTA 启动的 0.1.12 worker 会读取 sidecar，新的 supervisor 会消费启动前已有的请求。
 
 ## 3. 启用 sidecar，并等待 safe reload
 
@@ -128,6 +130,7 @@ computer_screenshot
 computer_action
 computer_handoff
 computer_setup
+computer_session
 ```
 
 客户端缓存未更新时，使用 `device_tools_list` 后按设备 ID 进行原始 `device_call`；不要以全局工具列表中残留的名称作为该设备已注册的证据。验收首先调用：
@@ -210,7 +213,7 @@ harness 直接验证本机 backend；**它不能替代第 4 节对实际 relay �
 每台设备仅在以下证据齐全后标 accepted：
 
 - 当前 worker 和 supervisor 为已批准版本/摘要，且有新 generation 的实时回调。
-- computer pack 的五个工具确实注册，computer_info 与预期平台相符。
+- computer pack 的六个工具确实注册，computer_info 与预期平台相符。
 - 所需系统能力可用；Android setup 和自有 UI 验收成功；平台受限时准确保留 blocked。
 - 已验证截图 image block/坐标与至少一次在自有测试界面的实际动作。
 - 凭据/设备身份未改变，原有环境恢复入口仍有效；无竞争 worker。
@@ -226,3 +229,23 @@ node "$CLI" computer-disable --config "$CONFIG"
 pause 阻止动作并允许观察；disable 也禁止截图。正在执行的 native 动作遵循取消及有界清理，不能承诺指令发出瞬间所有 OS 副作用消失。这些命令不删除 APK、不改配对、不清 kernel，不应为关闭 computer 功能而强杀整个 relay。
 
 版本 candidate 失败交由现有 updater 恢复可信版本；本地 reload 失败保留发布回滚历史。若发现已发布回归，停止推广并按正常发布流程修复，不手工篡改 journal、不跳过摘要检查、不反复重放最后一次 UI 动作。所有既有证据和回执保留，不删除以“重试干净”。
+
+## 9. 分别验收前台与隔离模式
+
+前台模式继续按用户意图操作其当前程序：info、screenshot 和 action 不带 `lease_id`。隔离模式显式调用 `computer_session`，由模型根据任务选择；不能因为隔离不可用或租约失效而回退成前台输入。切换目标后必须重新截图，两个模式的 frame 不能混用。
+
+隔离 runtime 需要安装时，显式调用 `computer_setup` 的 `{"workspace":true,"timeout_ms":120000}`。这条路不会运行前台 Android Unicode IME 安装器。Windows 要求普通已登录用户、已启用的 Child Sessions 和固定且验签的 Anode runtime；Linux 要求独立 Xpra/Xvfb 环境及可返回的物理桌面；Android 要求现有 root、Android 14+ 与独立显示焦点能力。macOS 当前保留前台能力，并明确报告通用原生隔离输入不可用。
+
+在部署自有测试程序中创建独立租约，例如：
+
+```json
+{"operation":"open","mode":"isolated","request_id":"deploy-isolated-open-1","width":1280,"height":800,"idle_timeout_ms":120000,"max_duration_ms":1800000}
+```
+
+收到 `lease_id` 后，使用该 ID 截图并对返回的新 frame 做一次有界输入；同时独立确认前台焦点、鼠标及相关全局设置没有变化。继续工作时显式 renew，完成时显式 close。普通观察或 native 心跳不会自动延长用户租约。
+
+Windows 默认隐藏自动登录失败时保留失败原因并清理自有资源。仅在用户在场并明确选择原生登录时，open 才添加 `interactive_sign_in:true`；原租约在用户登录期间保持 preparing，不能取得输入能力。不要记录凭据，也不要把一次成功登录等同于未来会话必定自动登录。普通 shell、broker 和计划任务操作不应弹出 PowerShell/Node 控制台。
+
+原生回收验收必须覆盖租约到期、设备连接中断、relay/broker/native helper 意外退出、授权撤销和创建期间取消。先证明输入已撤销，再证明同一测试任务/未保存内容已经回到可见位置，或明确记录 `cleanup_pending`。Windows/Linux 通过可见 viewer 保留无法跨会话迁移的应用；Android 将存活 task 移回 display 0 再移除自己的虚拟显示。测试不能为了让显示列表干净而关闭用户的未保存应用。
+
+每项记录原始 receipt、最终 CLI/native helper/harness 摘要与输入源码绑定。实际安装后的 MCP 调用验收与直接 provider/harness 验收分别记录；未在线、未登录或平台不支持不能记成通过。活动租约或待完成清理阻止 OTA 切换，恢复成功后才继续正常更新。

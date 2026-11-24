@@ -10,14 +10,14 @@ import (
 
 func isComputerTool(name string) bool {
 	switch name {
-	case "computer_info", "computer_screenshot", "computer_action", "computer_handoff", "computer_setup":
+	case "computer_info", "computer_screenshot", "computer_action", "computer_handoff", "computer_setup", "computer_session":
 		return true
 	}
 	return false
 }
 
 func isComputerWriteTool(name string) bool {
-	return name == "computer_action" || name == "computer_handoff" || name == "computer_setup"
+	return name == "computer_action" || name == "computer_handoff" || name == "computer_setup" || name == "computer_session"
 }
 
 // Validate only native image payloads. Unknown MCP content blocks remain opaque

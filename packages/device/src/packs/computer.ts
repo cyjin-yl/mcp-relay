@@ -12,6 +12,7 @@ import { createWindowsBackend } from "../computer/windows.js";
 import { pngDimensions } from "../computer/native.js";
 import { ComputerError, type ComputerAction, type ComputerBackend, type ComputerDisplay,
   type CapturedScreen, type NativeContext } from "../computer/types.js";
+import { WorkspaceManager } from "../computer/workspace-client.js";
 import { readComputerSettings, writeComputerSettings, type ComputerSettings } from "../computer/settings.js";
 
 const timeout = z.number().int().min(1).max(120000).optional();
@@ -27,15 +28,33 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("key"), keys: z.array(z.string().min(1).max(48)).min(1).max(8) }).strict(),
   z.object({ type: z.literal("text"), text: z.string().max(16384) }).strict()
 ]);
-const infoSchema = z.object({ timeout_ms: timeout }).strict();
-const inspectSchema = z.object({ display_id: z.string().min(1).max(200).optional(), timeout_ms: timeout }).strict();
-const screenshotSchema = z.object({ display_id: z.string().min(1).max(200).optional(), timeout_ms: timeout }).strict();
+const infoSchema = z.object({ workspace: z.boolean().optional(), timeout_ms: timeout }).strict();
+const leaseId = z.string().uuid().optional();
+const inspectSchema = z.object({ lease_id: leaseId, display_id: z.string().min(1).max(200).optional(), timeout_ms: timeout }).strict();
+const screenshotSchema = z.object({ lease_id: leaseId, display_id: z.string().min(1).max(200).optional(), timeout_ms: timeout }).strict();
 const inputSchema = z.object({
+  lease_id: leaseId,
   request_id: z.string().regex(/^[a-zA-Z0-9._:-]{1,128}$/),
   frame_id: z.string().min(1).max(200),
   action: actionSchema, screenshot_after: z.boolean().optional(), timeout_ms: timeout
 }).strict();
 const handoffSchema = z.object({ mode: z.enum(["pause", "resume"]), timeout_ms: timeout }).strict();
+
+const requestIdSchema = z.string().regex(/^[a-zA-Z0-9._:-]{1,128}$/);
+const sessionSchema = z.discriminatedUnion("operation", [
+  z.object({ operation: z.literal("open"), request_id: requestIdSchema, mode: z.literal("isolated"),
+    width: z.number().int().min(320).max(8192).optional(), height: z.number().int().min(240).max(8192).optional(),
+    idle_timeout_ms: z.number().int().min(1000).max(300000).optional(),
+    max_duration_ms: z.number().int().min(1000).max(86400000).optional(),
+    interactive_sign_in: z.boolean().optional().describe("Windows only: explicitly show the owned native Windows sign-in UI for the user to authenticate. Default false; no input is permitted until ready. Use timeout_ms:120000 when waiting for user sign-in."),
+    window_ids: z.array(z.string().min(1).max(200)).max(32).optional(),
+    launch: z.object({ executable: z.string().min(1).max(4096), args: z.array(z.string().max(16384)).max(64) }).strict().optional(),
+    timeout_ms: timeout }).strict(),
+  z.object({ operation: z.literal("renew"), lease_id: z.string().uuid(), request_id: requestIdSchema,
+    extend_ms: z.number().int().min(1000).max(300000).optional(), timeout_ms: timeout }).strict(),
+  z.object({ operation: z.literal("close"), lease_id: z.string().uuid(), request_id: requestIdSchema, timeout_ms: timeout }).strict(),
+  z.object({ operation: z.literal("status"), lease_id: leaseId, timeout_ms: timeout }).strict()
+]);
 
 function descriptor(name: string, description: string, schema: z.ZodType, readOnly: boolean): ToolDescriptor {
   const inputSchema = z.toJSONSchema(schema) as JsonObject;
@@ -43,13 +62,14 @@ function descriptor(name: string, description: string, schema: z.ZodType, readOn
   return { name, description, inputSchema, annotations: { readOnlyHint: readOnly } };
 }
 const tools: ToolDescriptor[] = [
-  descriptor("computer_info", "Inspect desktop and local PVE VM console availability, input capabilities, permissions, and pause state. On a PVE host, choose display_id pve:<VMID> to inspect that VM's actual console; omit it to discover targets. Does not start VMs, grant permissions, or install software.", inspectSchema, true),
-  descriptor("computer_screenshot", "Observe the host screen or a selected PVE VM console as a native PNG image. Use display_id from computer_info (pve:<VMID> for a VM). Returns frame_id and dimensions; all action coordinates are pixels of this exact image. Capture a fresh frame after changes.", screenshotSchema, true),
-  descriptor("computer_action", "Perform one bounded mouse/touch/keyboard/text action on a fresh frame. Requires write scope. Use a unique request_id; retrying the same ID never replays input in this worker. Unknown outcomes require a new screenshot before continuing. Text inserts text without pressing Enter.", inputSchema, false),
+  descriptor("computer_session", "Open, renew, close or inspect a leased isolated computer workspace. To operate the user foreground instead, use the existing screenshot/action tools without lease_id; no workspace is required. Isolated mode never falls back to the physical desktop. Explicit renewals keep the lease alive; disconnection, expiry or lost owner starts independent recovery. Close returns windows or a user-controlled viewer and revokes agent input. Requires an updated relay server and an installed platform provider.", sessionSchema, false),
+  descriptor("computer_info", "For foreground-safe control, open computer_session with mode isolated and pass its lease_id to info, screenshot and action. Inspect desktop and local PVE VM console availability, input capabilities, permissions, and pause state. On a PVE host, choose display_id pve:<VMID> to inspect that VM's actual console; omit it to discover targets. Does not start VMs, grant permissions, or install software.", inspectSchema, true),
+  descriptor("computer_screenshot", "With lease_id, capture only that isolated workspace; a closed/unavailable lease never falls back to the physical display. Choose foreground observation by omitting lease_id to observe the host screen or a selected PVE VM console as a native PNG image. Use display_id from computer_info (pve:<VMID> for a VM). Returns frame_id and dimensions; all action coordinates are pixels of this exact image. Capture a fresh frame after changes.", screenshotSchema, true),
+  descriptor("computer_action", "Choose foreground input by omitting lease_id and capturing a foreground frame. Choose isolated input by passing the same lease_id used to capture its frame_id. A mismatched frame or lease is rejected. Perform one bounded mouse/touch/keyboard/text action on a fresh frame. Requires write scope. Use a unique request_id; retrying the same ID never replays input in this worker. Unknown outcomes require a new screenshot before continuing. Text inserts text without pressing Enter.", inputSchema, false),
   descriptor("computer_handoff", "Pause or resume this device's computer control. Pause persists across updates; screenshots remain available. Resume requires fresh screenshots.", handoffSchema, false),
-  descriptor("computer_setup", "Explicitly set up the platform input bridge, when available. Android installs the bundled signed Unicode IME; OS permission or su prompts require the user's local approval. Never bypasses lock screens or permission dialogs.", infoSchema, false)
+  descriptor("computer_setup", "Explicitly set up the platform input bridge. Set workspace:true for the isolated workspace runtime; this never changes the physical clipboard or IME. Legacy Android setup installs its bundled Unicode IME. OS permission or su prompts require local approval; lock screens and permission dialogs remain enforced.", infoSchema, false)
 ];
-type Frame = { display: ComputerDisplay; capturedAt: number; appId?: string };
+type Frame = { display: ComputerDisplay; capturedAt: number; appId?: string; leaseId?: string; connectionEpoch?: string; ownerKey?: string };
 type Cached = { fingerprint: string; result: CallToolResult };
 
 export interface ComputerPackOptions {
@@ -59,6 +79,7 @@ export interface ComputerPackOptions {
   now?: () => number;
   lock?: () => Promise<() => Promise<void>>;
   settings?: () => ComputerSettings;
+  workspaceManager?: Pick<WorkspaceManager, "capabilities" | "setup" | "session" | "inspect" | "capture" | "act" | "updateBlockedReason" | "revokeOwner" | "closeAll" | "dispose">;
   saveSettings?: (change: Partial<Pick<ComputerSettings, "enabled" | "paused">>) => ComputerSettings;
 }
 
@@ -110,6 +131,7 @@ function errorResult(error: unknown, extra: Record<string, unknown> = {}): CallT
 
 export function createComputerPack(options: ComputerPackOptions): ToolPack {
   const backend = options.backend ?? selectComputerBackend();
+  const workspaces = options.workspaceManager ?? new WorkspaceManager({ configPath: options.configPath });
   const now = options.now ?? Date.now;
   const settings = options.settings ?? (() => readComputerSettings(options.configPath, options.defaultEnabled));
   const saveSettings = options.saveSettings ?? (change => writeComputerSettings(options.configPath, change, options.defaultEnabled));
@@ -130,9 +152,11 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
       "Computer control is disabled. Enable it locally with mcp-relay computer-enable --config <path>.");
     return current;
   };
-  async function capture(displayId: string | undefined, ctx: NativeContext): Promise<CallToolResult> {
+  async function capture(displayId: string | undefined, ctx: NativeContext, workspaceId?: string, packCtx?: PackContext): Promise<CallToolResult> {
     enabled();
-    const screen: CapturedScreen = await backend.screenshot(displayId, ctx);
+    const screen: CapturedScreen = workspaceId
+      ? await workspaces.capture(workspaceId, packCtx!, ctx) : await backend.screenshot(displayId, ctx);
+    if (workspaceId && displayId && screen.display.id !== displayId) throw new ComputerError("workspace_display_mismatch", "Requested display is not owned by this isolated workspace.");
     const dimensions = pngDimensions(screen.data);
     if (![screen.display.x, screen.display.y].every(Number.isFinite)
       || ![screen.display.scaleX ?? 1, screen.display.scaleY ?? 1].every(n => Number.isFinite(n) && n > 0)) {
@@ -148,10 +172,12 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
     for (const [id, frame] of frames) if (now() - frame.capturedAt > 120000) frames.delete(id);
     const frameId = generation + ":" + randomUUID();
     frames.set(frameId, { display: { ...screen.display }, capturedAt: screen.capturedAt,
-      ...(screen.app?.id ? { appId: screen.app.id } : {}) });
+      ...(screen.app?.id ? { appId: screen.app.id } : {}),
+      ...(workspaceId ? { leaseId: workspaceId, connectionEpoch: packCtx?.connection?.epoch, ownerKey: packCtx?.caller?.ownerKey } : {}) });
     while (frames.size > 12) frames.delete(frames.keys().next().value!);
     const metadata = { ok: true, frame_id: frameId, captured_at: new Date(screen.capturedAt).toISOString(),
       expires_in_ms: Math.max(0, 120000 - (now() - screen.capturedAt)), coordinate_space: "screenshot_pixels",
+      ...(workspaceId ? { lease_id: workspaceId } : {}),
       display: screen.display, ...(screen.app ? { app: screen.app } : {}), paused: settings().paused };
     return { content: [{ type: "image", mimeType: "image/png", data: screen.data.toString("base64") },
       { type: "text", text: JSON.stringify(metadata) }], structuredContent: metadata };
@@ -160,6 +186,10 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
   return {
     id: "computer",
     tools,
+    updateBlockedReason: () => workspaces.updateBlockedReason(),
+    connectionClosed: () => { frames.clear(); },
+    revokeWorkspaceOwner: async ownerKey => { frames.clear(); await workspaces.revokeOwner(ownerKey); },
+    dispose: () => workspaces.dispose(),
     async call(name: string, args: JsonObject, packCtx: PackContext): Promise<CallToolResult> {
       let release: (() => Promise<void>) | undefined;
       let deadline: ReturnType<typeof setTimeout> | undefined;
@@ -170,14 +200,15 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
       let actionType: string | undefined;
       const startedAt = now();
       try {
-        const parsed = name === "computer_action" ? inputSchema.parse(args)
+        const parsed = name === "computer_session" ? sessionSchema.parse(args)
+          : name === "computer_action" ? inputSchema.parse(args)
           : name === "computer_screenshot" ? screenshotSchema.parse(args)
           : name === "computer_handoff" ? handoffSchema.parse(args)
           : name === "computer_info" ? inspectSchema.parse(args)
           : name === "computer_setup" ? infoSchema.parse(args)
           : undefined;
         if (!parsed) throw new ComputerError("unknown_tool", "Unknown computer tool.");
-        const timeoutMs = parsed.timeout_ms ?? 30000;
+        const timeoutMs = parsed.timeout_ms ?? (name === "computer_session" && "interactive_sign_in" in parsed && parsed.interactive_sign_in === true ? 120000 : 30000);
         const controller = new AbortController();
         deadline = setTimeout(() => controller.abort(new ComputerError("timeout", "Computer operation exceeded its deadline.")), timeoutMs);
         const signal = packCtx.signal ? AbortSignal.any([packCtx.signal, controller.signal]) : controller.signal;
@@ -188,18 +219,27 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
           enabled: false, paused: settings().paused, backend: backend.id, generation
         });
         enabled();
+        if (name === "computer_session") {
+          const input = sessionSchema.parse(parsed);
+          if (settings().paused && (input.operation === "open" || input.operation === "renew")) throw new ComputerError("computer_paused", "Resume computer control before opening or renewing a workspace.");
+          if (input.operation === "close") frames.clear();
+          return jsonResult(await workspaces.session(input, { ...packCtx, signal }));
+        }
         if (name === "computer_handoff") {
           const input = handoffSchema.parse(parsed);
           saveSettings({ paused: input.mode === "pause" });
           frames.clear();
-          if (input.mode === "pause") activeAbort?.abort(new ComputerError("handoff", "Computer control was paused."));
+          if (input.mode === "pause") {
+            activeAbort?.abort(new ComputerError("handoff", "Computer control was paused."));
+            await workspaces.closeAll("disabled");
+          }
           return jsonResult({ ok: true, enabled: true, paused: input.mode === "pause", requires_new_frame: true });
         }
         if (name === "computer_action") {
           const input = inputSchema.parse(parsed);
           requestId = input.request_id; actionType = input.action.type;
           fingerprint = createHash("sha256").update(JSON.stringify({
-            frame_id: input.frame_id, action: input.action, screenshot_after: input.screenshot_after ?? false
+            lease_id: input.lease_id, ...(input.lease_id ? { owner: packCtx.caller?.ownerKey, epoch: packCtx.connection?.epoch } : {}), frame_id: input.frame_id, action: input.action, screenshot_after: input.screenshot_after ?? false
           })).digest("hex");
           const cached = receipts.get(requestId);
           if (cached) {
@@ -229,13 +269,21 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
           } catch { controller.abort(new ComputerError("computer_disabled", "Computer settings could not be read.")); }
         }, 100);
         if (name === "computer_info") {
-          return jsonResult({ ...await backend.inspect(context(), inspectSchema.parse(parsed).display_id), enabled: true, paused: settings().paused,
+          const input = inspectSchema.parse(parsed);
+          const state = input.lease_id ? await workspaces.inspect(input.lease_id, packCtx, context()) : await backend.inspect(context(), input.display_id);
+          if (input.lease_id && input.display_id && !state.displays.some(display => display.id === input.display_id)) throw new ComputerError("workspace_display_mismatch", "Display is not owned by this workspace.");
+          return jsonResult({ ...state, enabled: true, paused: settings().paused,
+            ...(!input.lease_id ? { workspace: await workspaces.capabilities(context()) } : { lease_id: input.lease_id }),
             generation, frame_ttl_ms: 120000, limits: { screenshot_bytes: MAX_NATIVE_IMAGE_BYTES, text_utf8_bytes: 65536 } });
         }
-        if (name === "computer_screenshot") return await capture(screenshotSchema.parse(parsed).display_id, context());
+        if (name === "computer_screenshot") {
+          const input = screenshotSchema.parse(parsed);
+          return await capture(input.display_id, context(), input.lease_id, packCtx);
+        }
         if (name === "computer_setup") {
           if (settings().paused) throw new ComputerError("computer_paused", "Resume computer control before setup.");
           frames.clear();
+          if (infoSchema.parse(parsed).workspace) return jsonResult({ ok: true, ...await workspaces.setup(context()) });
           return jsonResult({ ok: true, ...(backend.setup ? await backend.setup(context()) : {
             state: await backend.inspect(context()), automaticInstall: false
           }) });
@@ -245,8 +293,11 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
         if (!frame || now() - frame.capturedAt > 120000) {
           throw new ComputerError("stale_frame", "Unknown or expired frame. Capture a fresh screenshot before acting.");
         }
+        if (frame.leaseId !== input.lease_id || (frame.leaseId && (frame.connectionEpoch !== packCtx.connection?.epoch || frame.ownerKey !== packCtx.caller?.ownerKey))) throw new ComputerError("workspace_frame_mismatch", "Frame belongs to a different workspace or connection.");
         checkAction(input.action, frame.display);
-        const state = await backend.inspect({ ...context(), expectedAppId: frame.appId }, frame.display.id);
+        const state = frame.leaseId
+          ? await workspaces.inspect(frame.leaseId, packCtx, { ...context(), expectedAppId: frame.appId })
+          : await backend.inspect({ ...context(), expectedAppId: frame.appId }, frame.display.id);
         if (!state.available) throw new ComputerError("desktop_unavailable", state.reason ?? "Desktop is unavailable.");
         if (!state.actions.includes(input.action.type)) {
           throw new ComputerError("unsupported_action", "This device does not support action " + input.action.type + ".");
@@ -264,7 +315,9 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
         if (settings().paused) throw new ComputerError("computer_paused", "Computer control is paused.");
         frames.clear(); // Consume all pre-action observations, including on unknown outcomes.
         attempted = true;
-        const outcome = await backend.act(input.action, current, { ...context(), expectedAppId: frame.appId });
+        const outcome = frame.leaseId
+          ? await workspaces.act(frame.leaseId, requestId!, input.action, packCtx, { ...context(), expectedAppId: frame.appId })
+          : await backend.act(input.action, current, { ...context(), expectedAppId: frame.appId });
         const receipt = { ok: true, request_id: requestId, action: actionType,
           completed_at: new Date(now()).toISOString(), elapsed_ms: now() - startedAt,
           ...outcome, requires_new_frame: true };
@@ -272,7 +325,7 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
         remember(requestId!, fingerprint!, result);
         if (!input.screenshot_after) return result;
         try {
-          const observed = await capture(current.id, context());
+          const observed = await capture(current.id, context(), frame.leaseId, packCtx);
           return { content: [...result.content, ...observed.content],
             structuredContent: { receipt, observation: observed.structuredContent } };
         } catch (error) {
