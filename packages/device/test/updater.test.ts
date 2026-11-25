@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -318,7 +318,7 @@ it("ignores a downgrade and supports a local check request without changing the 
 });
 
 
-async function fullLauncherFixture(failNewSupervisor = false, holdCurrentManifest = false) {
+async function fullLauncherFixture(failNewSupervisor = false, holdCurrentManifest = false, viaNpmBin = false) {
   const root = temporaryDirectory();
   const stateDir = join(root, "controller state");
   const eventsFile = join(root, "controller events.jsonl");
@@ -370,7 +370,23 @@ async function fullLauncherFixture(failNewSupervisor = false, holdCurrentManifes
     }));
   };
   offer("1.1.0");
-  const child = spawn(process.execPath, [join(releaseDir, "1.0.0.cjs"), eventsFile, stateDir, releaseDir], {
+  let launcherEntry = join(releaseDir, "1.0.0.cjs");
+  const bootstrapSha256 = createHash("sha256").update(readFileSync(launcherEntry)).digest("hex");
+  if (viaNpmBin) {
+    const packageDir = join(root, "npm package 空间");
+    const shim = join(packageDir, "bin", "mcp-relay.cjs");
+    const bundle = join(packageDir, "dist", "cli.cjs");
+    const bin = join(root, ".bin", "mcp-relay");
+    mkdirSync(dirname(shim), { recursive: true });
+    mkdirSync(dirname(bundle), { recursive: true });
+    mkdirSync(dirname(bin), { recursive: true });
+    copyFileSync(fileURLToPath(new URL("../bin/mcp-relay.cjs", import.meta.url)), shim);
+    copyFileSync(launcherEntry, bundle);
+    symlinkSync(relative(dirname(bin), shim), bin);
+    launcherEntry = bin;
+  }
+  const nodeArgs = viaNpmBin ? ["--preserve-symlinks-main"] : [];
+  const child = spawn(process.execPath, [...nodeArgs, launcherEntry, eventsFile, stateDir, releaseDir], {
     stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env, MCP_RELAY_LAUNCHED: "0", MCP_RELAY_SUPERVISOR: "0", MCP_RELAY_WORKER: "0", MCP_RELAY_START_DRAINED: "0" }
   });
@@ -384,6 +400,8 @@ async function fullLauncherFixture(failNewSupervisor = false, holdCurrentManifes
   });
   return {
     stateDir, events, offer, status: () => readUpdateStatus(stateDir),
+    bootstrapSha256,
+    savedBootstrapSha256: () => createHash("sha256").update(readFileSync(join(stateDir, "releases", bootstrapSha256, "cli.cjs"))).digest("hex"),
     releaseManifestCheck(version: string) { writeFileSync(join(releaseDir, version + ".manifest-ready"), "ready"); },
     async wait(predicate: () => boolean, timeout = 12_000) {
       const end = Date.now() + timeout;
@@ -413,8 +431,8 @@ async function fullLauncherFixture(failNewSupervisor = false, holdCurrentManifes
   };
 }
 
-it("hands off the complete supervisor A to B to C without accumulating parent processes", async () => {
-  const h = await fullLauncherFixture(false, true);
+it.each(process.platform === "win32" ? [false] : [false, true])("hands off the complete supervisor A to B to C without accumulating parent processes (npm bin: %s)", async (viaNpmBin) => {
+  const h = await fullLauncherFixture(false, true, viaNpmBin);
   const waitForActiveStatus = async (version: string, phase: "checking" | "running") => {
     let snapshot: Record<string, unknown> = {};
     await h.wait(() => {
@@ -432,6 +450,7 @@ it("hands off the complete supervisor A to B to C without accumulating parent pr
     h.releaseManifestCheck("1.1.0");
     const b = await waitForActiveStatus("1.1.0", "running");
     expect(b).toMatchObject({ version: "1.1.0", supervisorVersion: "1.1.0", phase: "running" });
+    expect(h.savedBootstrapSha256()).toBe(h.bootstrapSha256);
     expect(h.events().filter((event) => event.event === "launcher-entry")).toHaveLength(1);
     expect(h.events().some((event) => event.version === "1.1.0" && event.event === "supervisor-entry")).toBe(true);
     expect(h.livePids()).toHaveLength(3);
