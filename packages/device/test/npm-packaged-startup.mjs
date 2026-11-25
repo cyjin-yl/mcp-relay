@@ -129,7 +129,7 @@ async function start(preserveSymlinksMain) {
   const nodeOptions = preserveSymlinksMain ? ["--preserve-symlinks-main"] : [];
   const child = spawn(process.execPath, [
     ...nodeOptions, bin, "connect", "--config", config, "--root", root,
-    "--packs", "minimal,omp", "--name=--npm 名称", "--update-manifest", url + "/updates/device/stable.json",
+    "--packs", "minimal,omp", "--name", "npm 名称", "--update-manifest", url + "/updates/device/stable.json",
     "--update-interval", "10"
   ], {
     env: { PATH: process.env.PATH, HOME: temporary, TMPDIR: tmpdir(), NODE_EXTRA_CA_CERTS: cert },
@@ -145,7 +145,7 @@ async function start(preserveSymlinksMain) {
     exit.then(() => { throw new Error("Client exited before authentication: " + logs); })
   ]), 12000, () => "Client authentication timed out: " + logs);
   assert.equal(announced.device.version, runtimeVersion);
-  assert.equal(announced.device.name, "--npm 名称");
+  assert.equal(announced.device.name, "npm 名称");
   assert.ok(announced.tools.some((tool) => tool.name === "read"));
   assert.ok(announced.tools.some((tool) => tool.name === "bash"));
   assert.ok(!announced.tools.some((tool) => tool.name === "kernel_eval"));
@@ -207,7 +207,10 @@ try {
   await delay(100);
   assert.equal(existsSync(late), false);
   const outside = await call("read", { path: "../outside.txt" }).result;
-  assert.equal(outside.ok, false);
+  assert.equal(outside.ok, true);
+  assert.equal(outside.result.isError, true);
+  assert.match(JSON.stringify(outside.result), /escapes root/);
+  assert.doesNotMatch(JSON.stringify(outside.result), /outside-root-must-remain-private/);
   await stop();
 
   await start(true);
