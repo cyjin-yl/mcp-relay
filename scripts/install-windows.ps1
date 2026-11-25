@@ -20,6 +20,7 @@ param(
     [string]$Packs = 'minimal,omp',
     [switch]$AllowKernel,
     [switch]$AllowComputer,
+    [switch]$AddComputer,
     [ValidateRange(10,86400)][int]$UpdateIntervalSeconds = 300,
     [ValidateRange(20,180)][int]$HealthTimeoutSeconds = 90,
     [string]$AcceptanceReceipt,
@@ -36,6 +37,7 @@ $journal = $null
 $transactionStarted = $false
 $taskRegistered = $false
 $legacyStopped = $false
+$runtimeCommitted = $false
 $bootstrapEntry = Join-Path $InstallRoot 'bootstrap.cjs'
 $journalPath = Join-Path $InstallRoot 'install-journal.json'
 $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -300,6 +302,24 @@ function Migration-Arguments($Tree) {
     if (-not $Tree.AutoUpdate) { $migrationArguments += '--no-auto-update' }
     return $migrationArguments
 }
+function Add-ComputerArguments([string[]]$Arguments) {
+    $options=Relay-Options $Arguments
+    if ($options.Command -ne 'connect') { throw 'Computer opt-in only applies to a connect invocation' }
+    $packs=if ($options.Values.ContainsKey('packs')) { @(([string]$options.Values['packs']).Split(',')) } else { @('minimal','omp') }
+    if ($packs -notcontains 'computer') { $packs += 'computer' }
+    $value=$packs -join ','
+    $result=@()
+    for ($index=0; $index -lt $Arguments.Count; $index++) {
+        $item=$Arguments[$index]
+        if ($item -eq '--packs') { $result += @('--packs',$value); $index++ }
+        elseif ($item.StartsWith('--packs=')) { $result += '--packs='+$value }
+        elseif ($item.StartsWith('--') -and $item.IndexOf('=') -lt 0 -and $options.Values[$item.Substring(2)] -is [string]) { $result += @($item,$Arguments[++$index]) }
+        else { $result += $item }
+    }
+    if (-not $options.Values.ContainsKey('packs')) { $result += @('--packs',$value) }
+    if (-not $options.Values['allow-computer']) { $result += '--allow-computer' }
+    return $result
+}
 function Managed-Arguments($Tree,[string[]]$PreviousArguments) {
     $managedArguments=@($PreviousArguments)
     if ($null -ne $Tree -and -not $Tree.AutoUpdate) {
@@ -309,6 +329,7 @@ function Managed-Arguments($Tree,[string[]]$PreviousArguments) {
     }
     if ($null -eq $Tree -or -not $Tree.Values.ContainsKey('update-manifest')) { $managedArguments += @('--update-manifest',$ManifestUrl) }
     if ($null -eq $Tree -or -not $Tree.Values.ContainsKey('update-interval')) { $managedArguments += @('--update-interval',[string]$UpdateIntervalSeconds) }
+    if ($AddComputer) { $managedArguments = @(Add-ComputerArguments $managedArguments) }
     return $managedArguments
 }
 function Read-Status {
@@ -337,6 +358,127 @@ function Node-Invocation([string]$Entry,[string[]]$Arguments,[string]$LogPath) {
         ('& ' + (Ps-Quote $NodePath) + ' @(' + $items + ') *>> ' + (Ps-Quote $LogPath))
         'exit $LASTEXITCODE'
     ) -join [Environment]::NewLine
+}
+function Same-TaskAction($Left,$Right) {
+    $a=@($Left.Actions); $b=@($Right.Actions)
+    return ($a.Count -eq 1 -and $b.Count -eq 1 -and (Canonical ([string]$a[0].Execute)) -eq (Canonical ([string]$b[0].Execute)) -and [string]$a[0].Arguments -ceq [string]$b[0].Arguments -and [string]$a[0].WorkingDirectory -ceq [string]$b[0].WorkingDirectory)
+}
+function Update-ComputerTaskAction($Task,$Tree) {
+    $oldActions=@($Task.Actions)
+    if ($oldActions.Count -ne 1 -or (Canonical ([string]$oldActions[0].Execute)) -notin @((Canonical $windowsScriptHost),(Canonical $windowsPowerShell),(Canonical $NodePath))) { throw 'Managed task uses an unrecognized action; computer startup options were not changed' }
+    $targetArguments=@(Managed-Arguments $Tree @(Migration-Arguments $Tree))
+    $startCode=Node-Invocation $bootstrapEntry $targetArguments (Join-Path $InstallRoot 'relay.log')
+    $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($startCode))
+    $hiddenCode=Hidden-Launcher $windowsPowerShell @('-NoLogo','-NoProfile','-NonInteractive','-WindowStyle','Hidden','-EncodedCommand',$encoded) $RelayRoot
+    if ((Canonical ([string]$oldActions[0].Execute)) -eq (Canonical $windowsScriptHost)) {
+        $oldArguments=@(Split-WindowsCommandLine ([string]$oldActions[0].Arguments))
+        if ($oldArguments.Count -eq 3 -and $oldArguments[0] -ieq '//B' -and $oldArguments[1] -ieq '//NoLogo' -and (Canonical $oldArguments[2]).StartsWith((Canonical $InstallRoot)+[IO.Path]::DirectorySeparatorChar) -and (Test-Path -LiteralPath $oldArguments[2] -PathType Leaf) -and [IO.File]::ReadAllText($oldArguments[2]) -ceq $hiddenCode) { return $false }
+    }
+    if (-not (Same-TaskAction (Existing-Task) $Task)) { throw 'Managed task action changed before computer opt-in; no action was replaced' }
+    $backup=Join-Path $InstallRoot ('backups\computer-action-'+[DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')+'-'+[Guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($backup) | Out-Null
+    $xml=Join-Path $backup 'previous-task.xml'
+    [IO.File]::WriteAllText($xml,(Export-ScheduledTask -TaskPath '\' -TaskName $TaskName),(New-Object Text.UTF8Encoding($false)))
+    $hidden=Join-Path $backup 'start-relay-hidden.vbs'
+    [IO.File]::WriteAllText($hidden,$hiddenCode,[Text.Encoding]::Unicode)
+    $action=New-ScheduledTaskAction -Execute $windowsScriptHost -Argument ('//B //NoLogo '+(Windows-Quote $hidden)) -WorkingDirectory $RelayRoot
+    $expected=[pscustomobject]@{Actions=@($action)}
+    $report.taskActionBackup=$xml; $report.taskActionBackupSha256=Hash $xml
+    try {
+        Set-ScheduledTask -TaskPath '\' -TaskName $TaskName -Action $action | Out-Null
+        if (-not (Same-TaskAction (Existing-Task) $expected) -or [IO.File]::ReadAllText($hidden) -cne $hiddenCode) { throw 'Managed computer startup action did not read back exactly' }
+    } catch {
+        $failure=$_
+        $current=Existing-Task
+        if (Same-TaskAction $current $expected) {
+            Set-ScheduledTask -TaskPath '\' -TaskName $TaskName -Action $oldActions | Out-Null
+            if (-not (Same-TaskAction (Existing-Task) $Task)) { throw 'Computer startup action rollback is pending; preserved task XML must be reconciled' }
+        } elseif (-not (Same-TaskAction $current $Task)) { throw 'Managed task action changed concurrently; preserved task XML must be reconciled' }
+        throw $failure
+    }
+    $report.taskActionUpdated=$true
+    return $true
+}
+function Invoke-ComputerControl([string]$Command,[bool]$DefaultEnabled=$false) {
+    $arguments=@($candidate,$Command,'--config',$ConfigPath)
+    if ($DefaultEnabled) { $arguments += '--allow-computer' }
+    $raw=@(& $NodePath @arguments 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw ('Computer control command did not finish successfully: '+$Command) }
+    try { $settings=($raw -join [Environment]::NewLine)|ConvertFrom-Json } catch { throw 'Computer control did not return a settings receipt' }
+    if ($settings.schema -ne 1 -or $settings.enabled -isnot [bool] -or $settings.paused -isnot [bool]) { throw 'Computer control settings receipt is invalid' }
+    return $settings
+}
+function Read-ComputerActivation([string[]]$RequiredPacks) {
+    $tree=$null
+    try { $tree=Select-RelayLauncherTree @(Owned-RelayProcesses) } catch { }
+    $defaultEnabled=($null -ne $tree -and [bool]$tree.Values['allow-computer'])
+    $settings=Invoke-ComputerControl 'computer-status' $defaultEnabled
+    $argvPacks=if ($null -ne $tree -and $tree.Values.ContainsKey('packs')) { @(([string]$tree.Values['packs']).Split(',')) } else { @() }
+    $packs=@($argvPacks)
+    # cli.ts constructs a computer pack whenever it is explicit in argv, even
+    # when a sidecar disables or pauses control. An implicit pack needs proof
+    # that this authenticated worker loaded the enabled sidecar.
+    if ($settings.enabled -and $packs -notcontains 'computer') { $packs += 'computer' }
+    $state=Read-Status
+    $worker=$null
+    if ($null -ne $tree -and $tree.Root.Bootstrap -and $tree.Processes.Count -eq 3) { $worker=$tree.Processes[2] }
+    $created=if ($null -ne $worker) { ([DateTimeOffset]([DateTime]$worker.CreatedAt)).ToUnixTimeMilliseconds() } else { 0 }
+    $ready=($null -ne $worker -and $worker.EntrySha256 -ieq $ExpectedSha256 -and $null -ne $state -and $state.phase -eq 'running' -and $state.sha256 -ieq $ExpectedSha256 -and $state.version -eq $version -and $state.supervisorVersion -eq $version -and $state.updatedAt -ge $created)
+    $settingsLoaded=($argvPacks -contains 'computer')
+    $reloadVerified=$false
+    if ($settings.PSObject.Properties.Name -contains 'revision' -and $null -ne $state -and $state.PSObject.Properties.Name -contains 'reload' -and $null -ne $state.reload) {
+        $reloadVerified=($state.reload.status -eq 'completed' -and $state.reload.requestKey -ceq $settings.revision)
+        $settingsLoaded=$settingsLoaded -or $reloadVerified
+    }
+    if (-not $settingsLoaded -and $ready -and $settings.PSObject.Properties.Name -contains 'updatedAt') {
+        # A fresh start can load an already-enabled sidecar without requesting
+        # another reload. Invalid optional timestamps cannot establish proof.
+        try { $settingsLoaded=($created -ge ([DateTimeOffset]([DateTime]$settings.updatedAt)).ToUnixTimeMilliseconds()) } catch { }
+    }
+    $packVerified=($ready -and $settingsLoaded -and @($RequiredPacks | Where-Object { $_ -notin $packs }).Count -eq 0 -and $packs -contains 'computer')
+    return [ordered]@{
+        requested=$true; enabled=$settings.enabled; paused=$settings.paused; effectivePacks=$packs
+        workerPackVerified=$packVerified; runtimeReady=$ready; complete=($settings.enabled -and $packVerified)
+        reloadRevisionVerified=$reloadVerified; settingsLoaded=$settingsLoaded
+        workerPid=$(if ($null -ne $worker) { $worker.Id } else { $null })
+        workerCreatedAt=$(if ($null -ne $worker) { $worker.CreatedAt } else { $null })
+        workerSha256=$(if ($null -ne $worker) { $worker.EntrySha256 } else { $null })
+        settingsRevision=$(if ($settings.PSObject.Properties.Name -contains 'revision') { $settings.revision } else { $null })
+        registrationVerified=$false; registrationVerification='requires fresh server MCP discovery'
+    }
+}
+function Ensure-ComputerActivation([string[]]$RequiredPacks) {
+    $activation=Read-ComputerActivation $RequiredPacks
+    $activation.enableInvoked=$false
+    if (-not $activation.enabled) {
+        # Explicit AddComputer grants opt-in. Never resume local pause or kill
+        # a busy worker; computer-enable asks the supervisor for safe drain.
+        $activation.enableInvoked=$true
+        try { $enabled=Invoke-ComputerControl 'computer-enable' }
+        catch { $activation.complete=$false; $activation.reason=$_.Exception.Message; return $activation }
+        $activation.enabled=$enabled.enabled; $activation.paused=$enabled.paused
+    }
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    $waitMilliseconds=[Math]::Min(20000,$HealthTimeoutSeconds*1000)
+    do {
+        $invoked=$activation.enableInvoked
+        $activation=Read-ComputerActivation $RequiredPacks
+        $activation.enableInvoked=$invoked
+        if ($activation.complete) { return $activation }
+        if (-not $activation.enabled) { $activation.reason='Computer control was disabled during activation; it was not enabled again'; return $activation }
+        if ($clock.ElapsedMilliseconds -ge $waitMilliseconds) { break }
+        Start-Sleep -Milliseconds 250
+    } while ($true)
+    $activation.reason='Computer opt-in is saved, but a safely drained worker with the required packs is still pending'
+    return $activation
+}
+function Complete-ComputerOptIn($Tree,$Task=$null) {
+    $report.installationCommitted=$true
+    if ($null -ne $Task) { Update-ComputerTaskAction $Task $Tree | Out-Null }
+    $required=if ($null -ne $Tree -and $Tree.Values.ContainsKey('packs')) { @(([string]$Tree.Values['packs']).Split(',')) } else { @($Packs.Split(',')) }
+    if ($required -notcontains 'computer') { $required += 'computer' }
+    $report.computer=Ensure-ComputerActivation $required
+    if (-not $report.computer.complete) { throw ([string]$report.computer.reason) }
 }
 function Restore-Previous($Saved) {
     if ($Saved -is [Collections.IDictionary]) { $Saved = ($Saved | ConvertTo-Json -Depth 15 | ConvertFrom-Json) }
@@ -448,15 +590,23 @@ try {
     # Release workers below an npx launcher do not imply a Scheduled Task exists.
     # Only a verified managed bootstrap rooted in that task is already installed.
     if ($null -ne $migration -and $migration.Root.Bootstrap -and $null -ne $oldTask -and [string]$oldTask.State -eq 'Running') {
-        & $NodePath $bootstrapEntry update-check --config $ConfigPath | Out-Null
-        $status = Read-Status
+        $status=if ($AddComputer) { Read-Status } else { $null }
+        if ($null -eq $status -or $status.phase -ne 'running' -or $status.sha256 -ine $ExpectedSha256 -or $status.supervisorVersion -ne $version) {
+            & $NodePath $bootstrapEntry update-check --config $ConfigPath | Out-Null
+            $status=Read-Status
+        }
         if ($null -ne $status -and $status.phase -eq 'running' -and $status.sha256 -ieq $ExpectedSha256 -and $status.supervisorVersion -eq $version) {
             if ($RequireOtaProof -and $status.previousVersion -ne $bootstrapVersion) { throw 'The active relay lacks the requested bootstrap-to-stable evidence' }
             # Replace only the next-start action of older console-host tasks.
             # Their current relay and terminal processes are left running.
             $oldActions=@($oldTask.Actions)
             if ($oldActions.Count -ne 1) { throw 'Managed task has an unexpected action count; no action was changed' }
-            if ((Canonical ([string]$oldActions[0].Execute)) -ne (Canonical $windowsScriptHost)) {
+            if ($AddComputer) {
+                $report.installedPhase='already-managed'
+                $report.runtimeVersion=$status.version; $report.supervisorVersion=$status.supervisorVersion
+                $report.runtimeSha256=$status.sha256; $report.otaProven=($BootstrapSha256 -ine $ExpectedSha256 -and $status.previousVersion -eq $bootstrapVersion)
+                Complete-ComputerOptIn $migration $oldTask
+            } elseif ((Canonical ([string]$oldActions[0].Execute)) -ne (Canonical $windowsScriptHost)) {
                 if ((Canonical ([string]$oldActions[0].Execute)) -notin @((Canonical $windowsPowerShell),(Canonical $NodePath))) { throw 'Managed task uses an unrecognized executable; no action was changed' }
                 $actionBackupDir=Join-Path $InstallRoot ('backups\hidden-action-'+[DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')+'-'+[Guid]::NewGuid().ToString('N'))
                 [IO.Directory]::CreateDirectory($actionBackupDir) | Out-Null
@@ -604,6 +754,13 @@ try {
     if (-not $healthy) { throw 'New launcher did not prove authenticated stable worker and supervisor activation before the deadline' }
     if ((Hash $ConfigPath) -ne $configHash) { throw 'Configuration changed during activation; installer did not overwrite it' }
     $journal.phase='active'; $journal.completedAt=[DateTime]::UtcNow.ToString('o'); Save-Json $journalPath $journal
+    if ($AddComputer) {
+        $runtimeCommitted=$true; $report.installedPhase='active'
+        $report.runtimeVersion=$status.version; $report.supervisorVersion=$status.supervisorVersion
+        $report.runtimeSha256=$status.sha256; $report.otaProven=($BootstrapSha256 -ine $ExpectedSha256 -and $status.previousVersion -eq $bootstrapVersion)
+        $report.journal=$journalPath
+        Complete-ComputerOptIn $healthyTree
+    }
     $report.phase='active'; $report.passed=$true; $report.runtimeVersion=$status.version; $report.supervisorVersion=$status.supervisorVersion
     $report.runtimeSha256=$status.sha256; $report.otaProven=($BootstrapSha256 -ine $ExpectedSha256 -and $status.previousVersion -eq $bootstrapVersion)
     $report.taskName=$TaskName; $report.logonPersistence='current-user interactive logon'; $report.journal=$journalPath
@@ -615,8 +772,10 @@ try {
 } catch {
     $report.error=$_.Exception.Message
     $report.permissionDenied=($_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::PermissionDenied -or $_.Exception.HResult -eq -2147024891)
-    $report.phase='failed'
-    if ($transactionStarted -and $null -ne $journal) {
+    $committed=($runtimeCommitted -or ($report.Contains('installationCommitted') -and $report.installationCommitted))
+    $report.phase=if ($committed -and $AddComputer) { 'capability-pending' } else { 'failed' }
+    if ($committed) { $report.installationCommitted=$true; $report.rollback='not attempted; the healthy managed installation remains active' }
+    if (-not $committed -and $transactionStarted -and $null -ne $journal) {
         try {
             $journal.phase='rollback-pending'; Save-Json $journalPath $journal
             Restore-Previous $journal
