@@ -18,7 +18,7 @@ import { computerSettingsPath, readComputerSettings, writeComputerSettings } fro
 import { runLauncher, runSupervisor, readUpdateStatus, requestUpdateCheck, requestWorkerReload, acquireUpdateLock } from "./updater.js";
 import type { ToolPack } from "./pack.js";
 
-const VERSION = "0.1.11";
+const VERSION = "0.1.12";
 const DEFAULT_URL = "https://relay.cyjin.dev";
 const SUPPORTED_PACKS: Record<string, true> = { minimal: true, omp: true, kernel: true, computer: true };
 
@@ -77,6 +77,18 @@ async function promptCode(): Promise<string> {
 }
 
 async function main(): Promise<number> {
+  // The independent desktop broker does not load a device token or connect.
+  if (process.argv[2] === "workspace-broker") {
+    const brokerArgs = parseArgs({
+      args: process.argv.slice(3),
+      options: { "workspace-directory": { type: "string" } }
+    });
+    const directory = brokerArgs.values["workspace-directory"];
+    if (!directory || resolve(directory) !== directory) throw new Error("workspace-directory must be absolute");
+    const { runWorkspaceBroker } = await import("./computer/workspace-broker.js");
+    const { createWorkspaceProvider } = await import("./computer/workspace-provider.js");
+    return runWorkspaceBroker(directory, await createWorkspaceProvider());
+  }
   const parsed = parseArgs({
     allowPositionals: true,
     options: {

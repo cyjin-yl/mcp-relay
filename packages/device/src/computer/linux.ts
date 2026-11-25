@@ -20,7 +20,7 @@ function xKey(key: string): string {
   throw new ComputerError("unsupported_key", "Unsupported X11 key name: " + key);
 }
 
-export function createLinuxBackend(env: NodeJS.ProcessEnv = process.env): ComputerBackend {
+export function createLinuxBackend(env: NodeJS.ProcessEnv = process.env, run: typeof runNative = runNative): ComputerBackend {
   const xdotool = findExecutable(["xdotool"], env);
   const importer = findExecutable(["import"], env);
   const magick = findExecutable(["magick"], env);
@@ -28,7 +28,7 @@ export function createLinuxBackend(env: NodeJS.ProcessEnv = process.env): Comput
   const capture = importer ?? magick;
   async function x(args: string[], ctx: NativeContext, input?: string): Promise<string> {
     if (!xdotool) throw new ComputerError("dependency_missing", "Install xdotool for Linux X11 input.");
-    const result = await runNative({ command: xdotool, args, env, ...(input === undefined ? {} : { input }) }, ctx);
+    const result = await run({ command: xdotool, args, env, ...(input === undefined ? {} : { input }) }, ctx);
     if (result.exitCode !== 0) throw new ComputerError("x11_command_failed",
       "The X11 server rejected the input/query; check the active desktop and XAUTHORITY.");
     return result.stdout.toString("utf8").trim();
@@ -47,7 +47,7 @@ export function createLinuxBackend(env: NodeJS.ProcessEnv = process.env): Comput
     if (!xdotool) return { ...base, reason: "Linux X11 input requires xdotool.", details: { missing: ["xdotool"] } };
     if (loginctl && env.XDG_SESSION_ID && /^[a-zA-Z0-9_-]+$/.test(env.XDG_SESSION_ID)) {
       try {
-        const locked = await runNative({ command: loginctl,
+        const locked = await run({ command: loginctl,
           args: ["show-session", env.XDG_SESSION_ID, "--property=LockedHint", "--value"], env }, ctx);
         if (locked.exitCode === 0) {
           const state = locked.stdout.toString("utf8").trim();
@@ -103,7 +103,7 @@ export function createLinuxBackend(env: NodeJS.ProcessEnv = process.env): Comput
       if (displayId && displayId !== "desktop") throw new ComputerError("unknown_display", "Choose display desktop.");
       if (!capture) throw new ComputerError("dependency_missing", "Install ImageMagick for PNG screenshots.");
       const args = [...(!importer ? ["import"] : []), "-window", "root", "-silent", "png:-"];
-      const result = await runNative({ command: capture, args, env, maxOutputBytes: 12 * 1024 * 1024 }, ctx);
+      const result = await run({ command: capture, args, env, maxOutputBytes: 12 * 1024 * 1024 }, ctx);
       if (result.exitCode !== 0) throw new ComputerError("capture_failed", "X11 screenshot capture failed.");
       const dimensions = pngDimensions(result.stdout);
       const display = state.displays[0]!;

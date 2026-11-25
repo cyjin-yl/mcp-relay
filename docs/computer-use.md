@@ -1,11 +1,11 @@
-# Native computer use — device 0.1.11
+# Native computer use — device 0.1.12
 
 The optional computer pack adds computer_info, computer_screenshot, computer_action,
-computer_handoff, and computer_setup. Screenshots are native MCP PNG image blocks,
-with metadata kept separate from base64 image content. Action, handoff, and setup
+computer_handoff, computer_setup, and computer_session. Screenshots are native MCP PNG image blocks,
+with metadata kept separate from base64 image content. Action, handoff, setup, and session lifecycle
 always require relay.write, even if a device incorrectly marks them read-only.
 
-Release evidence, native platform checks and actual installed Android acceptance are recorded in [the 0.1.11 verification report](VERIFICATION_20261124_0_1_11.md).
+Platform requirements and recovery behavior are described below. The [deployment runbook](../deploy/computer/runbook.md) covers activation, both target modes, and native acceptance. A source version or successful build alone does not establish that stable or npm has been published.
 
 ## Enablement and local controls
 
@@ -38,6 +38,137 @@ Local control changes take effect during an operation:
 Native cleanup completes before the desktop transaction lock is released. Pause
 persists across updates; screenshots remain available while paused. Disable also
 blocks screenshots. A fresh screenshot is required after handoff.
+
+## Choose foreground or isolated control
+
+Both modes remain available. The model chooses the target that fits the user's task.
+
+| Intent | Tool flow | Target |
+| --- | --- | --- |
+| Work in the user's current application | Call info/screenshot/action without a lease_id | The existing foreground desktop or explicitly selected PVE console |
+| Work without sharing the foreground keyboard, pointer or focus | Open computer_session with mode isolated, then pass its lease_id to info/screenshot/action | The leased private workspace |
+
+An isolated failure never redirects an action to the foreground. Foreground frames
+cannot be used in an isolated workspace, and workspace frames cannot be used for
+foreground input. Switching mode requires a fresh screenshot of the selected target.
+Foreground control retains the existing opt-in, local pause, scopes and frame checks.
+
+For explicit workspace runtime installation, use:
+
+~~~json
+{"workspace": true, "timeout_ms": 120000}
+~~~
+
+with computer_setup. This route does not run the foreground Android IME installer.
+Inspection and session creation do not download software or grant OS permissions.
+
+Open a workspace:
+
+~~~json
+{
+  "operation": "open",
+  "mode": "isolated",
+  "request_id": "research-workspace-1",
+  "width": 1600,
+  "height": 1000,
+  "idle_timeout_ms": 120000,
+  "max_duration_ms": 1800000
+}
+~~~
+
+The result includes lease_id, expiry, capabilities and recovery mode. A supported
+launch specification can start an application directly in the private workspace.
+Providers refuse unsupported adoption of existing foreground windows; they do not
+silently move unrelated applications.
+
+Linux gives launched applications a persistent home and XDG configuration, data,
+cache and state directories owned by that lease. This keeps ordinary browser and
+other single-instance application profiles separate from the foreground session.
+Known profile and existing-instance override options are rejected before launch.
+To use an already-open application or its existing sign-in state, choose foreground
+mode. The private application home is preserved with the workspace after handoff;
+recovery does not delete its files. Use applications that honor these directories. Custom launchers that hard-code
+another profile or connect to another display can still affect that other session.
+
+On Windows, the default open attempts native automatic sign-in with its viewer
+hidden. If Windows requires credentials, it fails closed and returns its owned
+resources; the model must not type credentials into the user's desktop. When the
+user is present and explicitly chooses to sign in, add `interactive_sign_in: true`
+to the open request. Only this option displays the native Windows sign-in viewer.
+The original lease stays in `preparing` with no agent input capability while the
+user signs in. After native readiness, child-session identity and PointerGuard are
+verified, the viewer hides and that same lease becomes active. The default call
+budget becomes 120 seconds, still bounded by the lease and authorization expiry;
+an explicit shorter `timeout_ms` remains authoritative. Signing in does not imply
+that Windows will automatically authenticate future sessions. Other platforms
+reject this Windows-only option.
+
+Capture and act using the same lease:
+
+~~~json
+{"lease_id": "<lease UUID>", "timeout_ms": 30000}
+~~~
+
+~~~json
+{
+  "lease_id": "<lease UUID>",
+  "request_id": "research-click-1",
+  "frame_id": "<fresh workspace frame>",
+  "action": {"type": "click", "x": 320, "y": 180},
+  "screenshot_after": true
+}
+~~~
+
+Use computer_session with operation renew, the lease_id, a new request_id and
+extend_ms while work continues. The default idle lease is two minutes; ordinary
+screenshots and native watchdog heartbeats do not silently extend it. The default
+hard lifetime is thirty minutes, also bounded by the authenticated token's expiry.
+Close explicitly when finished:
+
+~~~json
+{"operation": "close", "lease_id": "<lease UUID>", "request_id": "research-close-1"}
+~~~
+
+### Workspace providers and recovery
+
+| Platform | Isolation | Return path and requirements |
+| --- | --- | --- |
+| Windows | Native Child Session; independent desktop/input; pinned Anode runtime with verified PointerGuard | Agent input is revoked and the retained session viewer is placed on the physical desktop. Cross-session application windows cannot be reparented into the user's session. Child Sessions and a successful native Windows login are required. |
+| Linux | Private Xvfb/X11 server and Xpra; physical clipboard, audio and file forwarding disabled | Applications remain alive in a visible Xpra viewer on the original desktop. Requires Xpra, Xvfb, xauth, xdotool, Openbox, ImageMagick, python3-xlib and python3-pil, plus a working physical X11/XWayland return target. |
+| Rooted Android 14+ | Trusted VirtualDisplay with OWN_FOCUS and STEAL_TOP_FOCUS_DISABLED; display-targeted input and capture | The helper moves surviving tasks to display 0, releases its own display and confirms removal. It does not switch the global IME or use the clipboard. Isolated text is currently ASCII only. |
+| macOS | Unavailable for generic isolated native application input | Existing foreground computer use remains available. The reviewed virtual-display route has incomplete focus-route verification and unsafe abandoned-app termination defaults, so relay creates no virtual display through it. |
+
+These are input workspaces, not application security sandboxes. Applications still
+run with the device user's account and file permissions. Android applications also
+share that user's system clipboard; workspace tools never access it and reject
+clipboard shortcuts. The reported clipboardBoundary makes this distinction explicit.
+
+Closing, expiry, lost relay connection, local pause/disable or authorization
+revocation first fences further agent input, then starts recovery. Stateless HTTP
+request completion is not treated as a disconnect: idle expiry covers a client that
+simply stops renewing. Device WebSocket loss and a stale authenticated transport are
+separate recovery signals. Revoking a temporary share also revokes its already-open
+workspaces after the original HTTP call has completed.
+
+A separate broker owns each lease. Native platform guardians have their own clocks
+and liveness checks, so killing the relay worker cannot leave an unlimited lease.
+A durable revocation marker fences delayed task/helper startup as well as later
+input. Resource journals and exact instance/process identity prevent cleanup from
+targeting a reused display ID or another session.
+
+Recovery never closes unsaved applications just to remove a display. A visible
+handoff viewer is the return mechanism for platforms that cannot move a window
+across login/X11 sessions. No physical monitor is added by the Windows or Linux
+providers. If the return target is unavailable, status reports cleanup_pending,
+agent input remains disabled and recovery retries. It does not report success
+until a return receipt is verified. Active leases and unresolved cleanup defer
+automatic updates.
+
+Windows shell calls use both hidden native spawning and PowerShell's explicit
+hidden window mode. Persistent task launchers use the GUI Windows Script Host with
+a private hidden child, rather than opening a console through Task Scheduler.
+Explicit native OS login or permission dialogs remain visible when setup needs them;
+normal command execution must not open a PowerShell/Terminal window.
 
 ## Platform backends
 

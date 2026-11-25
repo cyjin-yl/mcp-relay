@@ -19,6 +19,7 @@ param(
     [string]$TaskName = 'MyDevices-McpRelay-ezra',
     [string]$Packs = 'minimal,omp',
     [switch]$AllowKernel,
+    [switch]$AllowComputer,
     [ValidateRange(10,86400)][int]$UpdateIntervalSeconds = 300,
     [ValidateRange(20,180)][int]$HealthTimeoutSeconds = 90,
     [string]$AcceptanceReceipt,
@@ -38,14 +39,55 @@ $legacyStopped = $false
 $bootstrapEntry = Join-Path $InstallRoot 'bootstrap.cjs'
 $journalPath = Join-Path $InstallRoot 'install-journal.json'
 $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$windowsScriptHost = Join-Path $env:SystemRoot 'System32\wscript.exe'
 $report = [ordered]@{
     schemaVersion=1; mode=$Mode; passed=$false; phase='validating'
-    computerName=$env:COMPUTERNAME; identity=$identity.Name; administrator=$administrator
+    computerName=[Environment]::MachineName; identity=$identity.Name; administrator=$administrator
     startedAt=[DateTime]::UtcNow.ToString('o')
 }
 function Hash([string]$Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Canonical([string]$Path) { return [IO.Path]::GetFullPath($Path).TrimEnd('\','/').ToLowerInvariant() }
 function Ps-Quote([string]$Value) { return "'" + $Value.Replace("'","''") + "'" }
+
+function Windows-Quote([string]$Value) {
+    return '"' + [regex]::Replace([regex]::Replace($Value,'(\\*)"','$1$1\"'),'(\\+)$','$1$1') + '"'
+}
+function Vbs-Quote([string]$Value) { return '"' + $Value.Replace('"','""') + '"' }
+function Hidden-Launcher([string]$Program,[string[]]$Arguments,[string]$WorkingDirectory) {
+    foreach ($value in (@($Program,$WorkingDirectory) + @($Arguments))) {
+        if ($value -match '[%\r\n\x00]') { throw 'Hidden launcher refuses environment expansion and control characters in its command' }
+    }
+    $command = @((@($Program) + @($Arguments)) | ForEach-Object { Windows-Quote $_ }) -join ' '
+    return @(
+        'Option Explicit'
+        'Dim shell, exitCode'
+        'Set shell = CreateObject("WScript.Shell")'
+        ('shell.CurrentDirectory = ' + (Vbs-Quote $WorkingDirectory))
+        ('exitCode = shell.Run(' + (Vbs-Quote $command) + ', 0, True)')
+        'WScript.Quit exitCode'
+    ) -join [Environment]::NewLine
+}
+function Assert-HiddenLauncherAvailable {
+    if (-not (Test-Path -LiteralPath $windowsScriptHost -PathType Leaf)) { throw 'Windows Script Host is unavailable; the existing relay was not stopped' }
+    foreach ($key in @('HKCU:\Software\Microsoft\Windows Script Host\Settings','HKLM:\Software\Microsoft\Windows Script Host\Settings')) {
+        $policy=Get-ItemProperty -LiteralPath $key -Name Enabled -ErrorAction SilentlyContinue
+        if ($null -ne $policy -and $policy.Enabled -eq 0) { throw 'Windows Script Host is disabled; the existing relay was not stopped' }
+    }
+    $probePath=Join-Path $InstallRoot ('hidden-launcher-probe-'+[Guid]::NewGuid().ToString('N')+'.vbs')
+    [IO.File]::WriteAllText($probePath,'WScript.Quit 0',[Text.Encoding]::Unicode)
+    $probe=New-Object Diagnostics.Process
+    try {
+        $probe.StartInfo.FileName=$windowsScriptHost
+        $probe.StartInfo.Arguments='//B //NoLogo '+(Windows-Quote $probePath)
+        $probe.StartInfo.UseShellExecute=$false
+        $probe.StartInfo.CreateNoWindow=$true
+        $probe.StartInfo.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+        [void]$probe.Start()
+        if (-not $probe.WaitForExit(5000)) { $probe.Kill(); throw 'Windows Script Host probe timed out; the existing relay was not stopped' }
+        if ($probe.ExitCode -ne 0) { throw 'Windows Script Host or VBScript is disabled/unavailable; the existing relay was not stopped' }
+    } finally { $probe.Dispose() }
+}
+
 function Save-Json([string]$Path, $Object) {
     [IO.Directory]::CreateDirectory((Split-Path -Parent ([IO.Path]::GetFullPath($Path)))) | Out-Null
     $temporary = $Path + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
@@ -73,44 +115,201 @@ function Managed-Task($Task) {
     if ($null -eq $Task) { return $false }
     return ([string]$Task.Description).StartsWith('My Devices relay managed by install-windows.ps1')
 }
-function Argument-Value([string]$CommandLine,[string]$Flag) {
-    $pattern = '(?:^|\s)' + [regex]::Escape($Flag) + '(?:=|\s+)(?:"([^"]*)"|(\S+))'
-    $match = [regex]::Match($CommandLine,$pattern,[Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if (-not $match.Success) { return $null }
-    if ($match.Groups[1].Success) { return $match.Groups[1].Value }
-    return $match.Groups[2].Value
+# Parse the argv emitted by Node/CreateProcess, including quoted paths and escaped
+# quotes. A path substring is not sufficient evidence that a process is ours.
+function Split-WindowsCommandLine([string]$CommandLine) {
+    $result = New-Object 'Collections.Generic.List[string]'
+    $index = 0
+    while ($index -lt $CommandLine.Length) {
+        while ($index -lt $CommandLine.Length -and [char]::IsWhiteSpace($CommandLine[$index])) { $index++ }
+        if ($index -ge $CommandLine.Length) { break }
+        $word = New-Object Text.StringBuilder
+        $quoted = $false
+        while ($index -lt $CommandLine.Length) {
+            $char = $CommandLine[$index]
+            if (-not $quoted -and [char]::IsWhiteSpace($char)) { break }
+            if ($char -eq '\') {
+                $slashes = 0
+                while ($index -lt $CommandLine.Length -and $CommandLine[$index] -eq '\') { $slashes++; $index++ }
+                if ($index -lt $CommandLine.Length -and $CommandLine[$index] -eq '"') {
+                    [void]$word.Append(('\' * [int][Math]::Floor($slashes / 2)))
+                    if (($slashes % 2) -eq 1) { [void]$word.Append('"') } else { $quoted = -not $quoted }
+                    $index++
+                } else { [void]$word.Append(('\' * $slashes)) }
+                continue
+            }
+            if ($char -eq '"') { $quoted = -not $quoted; $index++; continue }
+            [void]$word.Append($char)
+            $index++
+        }
+        if ($quoted) { throw 'Unterminated process command-line quote; no process was stopped' }
+        $result.Add($word.ToString())
+    }
+    return $result.ToArray()
+}
+function Relay-Options([string[]]$Arguments) {
+    if ($null -eq $Arguments) { $Arguments=@() }
+    $values = @{}
+    $valueFlags = @('root','config','name','packs','url','code','update-manifest','update-interval')
+    $booleanFlags = @('allow-shell','no-shell','allow-kernel','allow-computer','no-auto-update','verbose')
+    $command = 'connect'
+    $positional = $false
+    for ($i = 0; $i -lt $Arguments.Count; $i++) {
+        $item = $Arguments[$i]
+        if (-not $item.StartsWith('--')) {
+            if ($positional) { throw 'Unexpected positional relay argument; no process was stopped' }
+            $command=$item; $positional=$true; continue
+        }
+        $option=$item.Substring(2)
+        $equals=$option.IndexOf('=')
+        $name=if ($equals -ge 0) { $option.Substring(0,$equals) } else { $option }
+        if ($values.ContainsKey($name)) { throw 'Repeated relay option cannot be safely reconstructed' }
+        if ($name -in $valueFlags) {
+            if ($equals -ge 0) { $value=$option.Substring($equals+1) }
+            else {
+                $i++
+                if ($i -ge $Arguments.Count) { throw 'Relay process is missing an option value' }
+                $value=$Arguments[$i]
+            }
+            if ([string]::IsNullOrWhiteSpace($value)) { throw 'Relay process has an empty option value' }
+            $values[$name]=$value
+        } elseif ($name -in $booleanFlags -and $equals -lt 0) { $values[$name]=$true }
+        else { throw 'Unknown relay option cannot be safely reconstructed' }
+    }
+    return [pscustomobject]@{ Command=$command; Values=$values }
 }
 function Owned-RelayProcesses {
     $found = @()
-    $updatesRoot = Join-Path (Split-Path -Parent $ConfigPath) 'updates'
+    $updatesRoot = Canonical (Join-Path (Split-Path -Parent $ConfigPath) 'updates')
+    $releasePattern = '^' + [regex]::Escape($updatesRoot) + '[\\/][a-f0-9]{16}[\\/]releases[\\/]([a-f0-9]{64})[\\/]cli\.cjs$'
+    $recoveryPattern = '^' + [regex]::Escape((Canonical $InstallRoot)) + '[\\/]backups[\\/][^\\/]+[\\/]previous-cli\.cjs$'
     foreach ($item in @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'")) {
         $command = [string]$item.CommandLine
-        if ([string]::IsNullOrWhiteSpace($command) -or $command -notmatch '(?:^|\s)"?connect"?(?:\s|$)') { continue }
-        $legacy = $command.IndexOf($LegacyEntryPoint,[StringComparison]::OrdinalIgnoreCase) -ge 0
-        $legacyEntry = $LegacyEntryPoint
-        $recoveryPattern = [regex]::Escape($InstallRoot) + '[\\/]backups[\\/][^"\s]+[\\/]previous-cli\.cjs'
-        $recoveryMatch = [regex]::Match($command,$recoveryPattern,[Text.RegularExpressions.RegexOptions]::IgnoreCase)
-        if ($recoveryMatch.Success) { $legacy=$true; $legacyEntry=$recoveryMatch.Value }
-        $managed = $command.IndexOf($bootstrapEntry,[StringComparison]::OrdinalIgnoreCase) -ge 0
-        $givenConfig = Argument-Value $command '--config'
-        if (-not $managed -and $givenConfig -and $command.IndexOf($updatesRoot,[StringComparison]::OrdinalIgnoreCase) -ge 0 -and $command -match 'cli\.cjs') { $managed = $true }
-        $packageKnown = $command.IndexOf('\@cyjin\mcp-relay\',[StringComparison]::OrdinalIgnoreCase) -ge 0
+        if ([string]::IsNullOrWhiteSpace($command)) { continue }
+        # npm/npx wrappers are not relay owners. Parse the actual entry argv so
+        # a custom InstallRoot and normalized .bin/../ paths are recognized.
+        if ($command -notmatch '(?i)\.cjs') { continue }
+        $argv = @(Split-WindowsCommandLine $command)
+        if ($argv.Count -lt 2) { continue }
+        if (-not [IO.Path]::IsPathRooted($argv[1]) -or $argv[1] -notmatch '(?i)\.cjs$') {
+            foreach ($argument in $argv) {
+                if ([IO.Path]::IsPathRooted($argument) -and $argument -match '(?i)\.cjs$') {
+                    $possible=Canonical $argument
+                    if ($possible -eq (Canonical $LegacyEntryPoint) -or $possible -eq (Canonical $bootstrapEntry) -or $possible -match $releasePattern) { throw 'Relay uses unsupported Node startup options; no process was stopped' }
+                }
+            }
+            continue
+        }
+        $entry = [IO.Path]::GetFullPath($argv[1])
+        $canonicalEntry = Canonical $entry
+        $legacy = $canonicalEntry -eq (Canonical $LegacyEntryPoint) -or $canonicalEntry -match $recoveryPattern
+        $bootstrap = $canonicalEntry -eq (Canonical $bootstrapEntry)
+        $release = [regex]::Match($canonicalEntry,$releasePattern,[Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        $managed = $bootstrap -or $release.Success
+        $packageKnown = $canonicalEntry -match '[\\/]@cyjin[\\/]mcp-relay[\\/]dist[\\/]cli\.cjs$'
         if (-not $legacy -and -not $managed -and -not $packageKnown) { continue }
+        $arguments = @()
+        if ($argv.Count -gt 2) { $arguments = @($argv[2..($argv.Count-1)]) }
+        # Version/status commands are probes, not live relay connections.
+        if (@($arguments | Where-Object { $_ -in @('--version','-v','--help','-h') }).Count -gt 0) { continue }
+        $options = Relay-Options $arguments
+        if ($options.Command -ne 'connect') { continue }
+        $values=$options.Values
+        $givenConfig=$values['config']
         if ($givenConfig) {
-            if (-not [IO.Path]::IsPathRooted($givenConfig)) { $givenConfig = Join-Path $RelayRoot $givenConfig }
+            if (-not [IO.Path]::IsPathRooted($givenConfig)) { throw 'Relative relay configuration cannot be safely reconciled' }
             if ((Canonical $givenConfig) -ne (Canonical $ConfigPath)) { continue }
-        } elseif ($managed) { continue }
-        $givenRoot = Argument-Value $command '--root'
+        } elseif ((Canonical $ConfigPath) -ne (Canonical (Join-Path $env:USERPROFILE '.mcp-relay\device.json'))) { continue }
+        $givenRoot=$values['root']
         if ($givenRoot) {
-            if (-not [IO.Path]::IsPathRooted($givenRoot)) { $givenRoot = Join-Path $RelayRoot $givenRoot }
+            if (-not [IO.Path]::IsPathRooted($givenRoot)) { throw 'Relative relay root cannot be safely reconciled' }
             if ((Canonical $givenRoot) -ne (Canonical $RelayRoot)) { continue }
         }
         if (-not $legacy -and -not $managed) { throw 'A relay uses an unexpected package entry; provide its verified LegacyEntryPoint instead of stopping it by name' }
         $owner = Invoke-CimMethod -InputObject $item -MethodName GetOwnerSid
         if ($owner.ReturnValue -ne 0 -or $owner.Sid -ne $identity.User.Value) { throw 'A matching relay process is not verifiably owned by the current Windows identity' }
-        $found += [pscustomobject]@{ Id=[int]$item.ProcessId; ParentId=[int]$item.ParentProcessId; Legacy=$legacy; Managed=$managed; Entry=$legacyEntry }
+        $entryHash=Hash $entry
+        if ($release.Success -and $entryHash -ne $release.Groups[1].Value) { throw 'A managed release failed integrity verification; no process was stopped' }
+        $found += [pscustomobject]@{
+            Id=[int]$item.ProcessId; ParentId=[int]$item.ParentProcessId; CreatedAt=$item.CreationDate.ToUniversalTime().ToString('o')
+            Legacy=$legacy; Managed=$managed; Bootstrap=$bootstrap; Entry=$entry; EntrySha256=$entryHash
+            Values=$values
+        }
     }
     return $found
+}
+function Select-RelayLauncherTree([object[]]$Processes) {
+    if ($null -eq $Processes -or $Processes.Count -eq 0) { return $null }
+    $byId=@{}
+    foreach ($process in $Processes) {
+        if ($byId.ContainsKey($process.Id)) { throw 'Duplicate process identity; no process was stopped' }
+        $byId[$process.Id]=$process
+    }
+    $roots=@($Processes | Where-Object { -not $byId.ContainsKey($_.ParentId) })
+    if ($roots.Count -ne 1 -or $Processes.Count -gt 3) { throw 'Multiple matching relay launchers require explicit reconciliation; none was stopped' }
+    $root=$roots[0]
+    if (-not $root.Legacy -and -not $root.Bootstrap) { throw 'Relay worker has no verified launcher; no process was stopped' }
+    $chain=@($root)
+    $current=$root
+    while ($true) {
+        $children=@($Processes | Where-Object { $_.ParentId -eq $current.Id })
+        if ($children.Count -eq 0) { break }
+        if ($children.Count -ne 1 -or -not $children[0].Managed -or $children[0].Bootstrap) { throw 'Unexpected relay process topology; no process was stopped' }
+        if ($chain.Id -contains $children[0].Id) { throw 'Cyclic process identity; no process was stopped' }
+        $current=$children[0]
+        $chain += $current
+    }
+    if ($chain.Count -ne $Processes.Count) { throw 'Unrelated relay processes cannot be migrated together' }
+    # The supervisor explicitly expands defaults, including an npx launch with no
+    # arguments. Its root/config identify the actual cwd of the original launcher.
+    $effective=$chain[$chain.Count-1].Values
+    if (-not $effective.ContainsKey('root')) { throw 'Implicit relay root cannot be verified without its supervisor; no process was stopped' }
+    if ($chain.Count -gt 1 -and -not $effective.ContainsKey('config')) { throw 'Relay supervisor omitted its explicit configuration' }
+    foreach ($member in $chain) {
+        foreach ($key in @('root','config','name','url','update-manifest','update-interval')) {
+            if ($member.Values.ContainsKey($key) -and $effective.ContainsKey($key) -and $member.Values[$key] -ine $effective[$key]) {
+                if ($key -in @('root','config') -and (Canonical $member.Values[$key]) -eq (Canonical $effective[$key])) { continue }
+                throw 'Relay launcher and worker settings disagree; no process was stopped'
+            }
+        }
+        if ([bool]$member.Values['no-shell'] -ne [bool]$effective['no-shell'] -or [bool]$member.Values['allow-kernel'] -ne [bool]$effective['allow-kernel']) { throw 'Relay launcher and worker permissions disagree' }
+        if ($member.Values.ContainsKey('packs') -and $effective.ContainsKey('packs')) {
+            $missing=@(([string]$member.Values['packs']).Split(',') | Where-Object { $_ -notin ([string]$effective['packs']).Split(',') })
+            $extra=@(([string]$effective['packs']).Split(',') | Where-Object { $_ -notin ([string]$member.Values['packs']).Split(',') -and $_ -ne 'computer' })
+            if ($missing.Count -gt 0 -or $extra.Count -gt 0) { throw 'Relay launcher and worker tool packs disagree' }
+        }
+    }
+    return [pscustomobject]@{ Root=$root; Processes=$chain; Values=$effective; AutoUpdate=(-not [bool]$root.Values['no-auto-update']) }
+}
+function Migration-Arguments($Tree) {
+    $values=$Tree.Values
+    $migrationArguments=@('connect','--root',$RelayRoot,'--config',$ConfigPath)
+    foreach ($key in @('name','packs','url','update-manifest','update-interval')) {
+        if ($values.ContainsKey($key)) {
+            $value=[string]$values[$key]
+            # Node parseArgs requires an equals form when a string value looks
+            # like an option; preserve legitimate names such as --workstation.
+            if ($value.StartsWith('--')) { $migrationArguments += ('--'+$key+'='+$value) }
+            else { $migrationArguments += @(('--'+$key),$value) }
+        }
+    }
+    foreach ($key in @('allow-shell','no-shell','allow-kernel','allow-computer','verbose')) {
+        if ($values[$key]) { $migrationArguments += '--'+$key }
+    }
+    # A one-time pairing code never enters task arguments or recovery journals.
+    if (-not $Tree.AutoUpdate) { $migrationArguments += '--no-auto-update' }
+    return $migrationArguments
+}
+function Managed-Arguments($Tree,[string[]]$PreviousArguments) {
+    $managedArguments=@($PreviousArguments)
+    if ($null -ne $Tree -and -not $Tree.AutoUpdate) {
+        # Migration-Arguments appends the flag as its final token. A value with
+        # the same spelling remains intact in its --name=value representation.
+        $managedArguments=@($PreviousArguments[0..($PreviousArguments.Count-2)])
+    }
+    if ($null -eq $Tree -or -not $Tree.Values.ContainsKey('update-manifest')) { $managedArguments += @('--update-manifest',$ManifestUrl) }
+    if ($null -eq $Tree -or -not $Tree.Values.ContainsKey('update-interval')) { $managedArguments += @('--update-interval',[string]$UpdateIntervalSeconds) }
+    return $managedArguments
 }
 function Read-Status {
     $raw = @(& $NodePath $bootstrapEntry update-status --config $ConfigPath 2>$null)
@@ -140,12 +339,17 @@ function Node-Invocation([string]$Entry,[string[]]$Arguments,[string]$LogPath) {
     ) -join [Environment]::NewLine
 }
 function Restore-Previous($Saved) {
+    if ($Saved -is [Collections.IDictionary]) { $Saved = ($Saved | ConvertTo-Json -Depth 15 | ConvertFrom-Json) }
     if ($Saved.computerName -ine $ExpectedComputerName -or $Saved.identity -ine $identity.Name) { throw 'Recovery journal identity mismatch' }
     $currentTask = Existing-Task
     if ($null -ne $currentTask -and (Managed-Task $currentTask)) {
         Stop-ScheduledTask -TaskPath '\' -TaskName $TaskName -ErrorAction SilentlyContinue
     }
-    Wait-NoManaged 20
+    $previousStillRunning = $false
+    if ($Saved.PSObject.Properties.Name -contains 'legacyProcessId' -and $Saved.legacyWasRunning) {
+        $previousStillRunning = @(Owned-RelayProcesses | Where-Object { $_.Id -eq $Saved.legacyProcessId -and $_.CreatedAt -eq $Saved.legacyProcessCreatedAt -and (Canonical $_.Entry) -eq (Canonical $Saved.legacyEntryPoint) -and $_.EntrySha256 -eq $Saved.legacySha256 }).Count -eq 1
+    }
+    if (-not $previousStillRunning) { Wait-NoManaged 20 }
     if ((Hash $ConfigPath) -ne $Saved.configSha256) { throw 'Device configuration changed during deployment; recovery stopped without overwriting credentials' }
     if ($Saved.taskWasPresent) {
         if (-not (Test-Path -LiteralPath $Saved.taskBackup -PathType Leaf) -or (Hash $Saved.taskBackup) -ne $Saved.taskBackupSha256) { throw 'Previous task backup failed integrity verification' }
@@ -154,11 +358,14 @@ function Restore-Previous($Saved) {
     } elseif ($null -ne $currentTask -and (Managed-Task $currentTask)) {
         Unregister-ScheduledTask -TaskPath '\' -TaskName $TaskName -Confirm:$false
     }
-    if ($Saved.legacyWasRunning -and -not $Saved.taskWasRunning -and @(Owned-RelayProcesses | Where-Object { $_.Legacy }).Count -eq 0) {
+    if ($Saved.legacyWasRunning -and -not $Saved.taskWasRunning -and -not $previousStillRunning -and @(Owned-RelayProcesses | Where-Object { $_.Legacy }).Count -eq 0) {
         if ((Hash $Saved.legacyRestoreEntryPoint) -ne $Saved.legacySha256) { throw 'Previous relay entry failed integrity verification' }
         $restoreCode = Node-Invocation $Saved.legacyRestoreEntryPoint @($Saved.legacyArgs) (Join-Path $InstallRoot 'rollback.log')
         $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($restoreCode))
-        Start-Process -FilePath $windowsPowerShell -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-WindowStyle','Hidden','-EncodedCommand',$encoded) -WorkingDirectory $RelayRoot -WindowStyle Hidden | Out-Null
+        $rollbackLauncher=Join-Path $InstallRoot ('rollback-hidden-'+[Guid]::NewGuid().ToString('N')+'.vbs')
+        $hiddenCode=Hidden-Launcher $windowsPowerShell @('-NoLogo','-NoProfile','-NonInteractive','-WindowStyle','Hidden','-EncodedCommand',$encoded) $RelayRoot
+        [IO.File]::WriteAllText($rollbackLauncher,$hiddenCode,[Text.Encoding]::Unicode)
+        Start-Process -FilePath $windowsScriptHost -ArgumentList @('//B','//NoLogo',(Windows-Quote $rollbackLauncher)) -WorkingDirectory $RelayRoot -WindowStyle Hidden | Out-Null
         $deadline = [DateTime]::UtcNow.AddSeconds(10)
         while (@(Owned-RelayProcesses | Where-Object { $_.Legacy }).Count -eq 0) {
             if ([DateTime]::UtcNow -gt $deadline) { throw 'Previous relay restart was not observed; recovery evidence was retained' }
@@ -167,7 +374,7 @@ function Restore-Previous($Saved) {
     }
 }
 try {
-    if ($env:COMPUTERNAME -ine $ExpectedComputerName -or $identity.Name -ine $ExpectedIdentity) { throw 'Unexpected Windows computer or account identity; deployment stopped' }
+    if ([Environment]::MachineName -ine $ExpectedComputerName -or $identity.Name -ine $ExpectedIdentity) { throw 'Unexpected Windows computer or account identity; deployment stopped' }
     if ($NodePath -match '[\\/]fnm_multishells[\\/]') { throw 'Use a stable Node executable, not a temporary fnm multishell entry' }
     foreach ($path in @($NodePath,$BundlePath,$BootstrapPath,$HarnessPath,$ConfigPath)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw ('Required file is unavailable: ' + $path) }
@@ -183,7 +390,7 @@ try {
     if ([string]::IsNullOrWhiteSpace($deviceName)) { $deviceName = $ExpectedComputerName }
     $nodeVersion = (@(& $NodePath --version) -join '').Trim().TrimStart('v')
     if ($LASTEXITCODE -ne 0 -or [version]$nodeVersion -lt [version]'22.5.0') { throw 'Node 22.5 or newer is required' }
-    if ($Packs -notmatch '^(minimal|omp|kernel)(,(minimal|omp|kernel))*$' -or ($Packs -match 'kernel' -and -not $AllowKernel)) { throw 'Requested packs or kernel authorization are invalid' }
+    if ($Packs -notmatch '^(minimal|omp|kernel|computer)(,(minimal|omp|kernel|computer))*$' -or ($Packs -match 'kernel' -and -not $AllowKernel)) { throw 'Requested packs or kernel authorization are invalid' }
     $mutexKey = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes((Canonical $ConfigPath)))).Replace('-','').Substring(0,20)
     $mutex = New-Object Threading.Mutex($false,('Global\MyDevicesRelayInstall-' + $mutexKey))
     try { $ownsMutex = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
@@ -219,6 +426,7 @@ try {
         $report | ConvertTo-Json -Depth 10 -Compress
         exit 0
     }
+    Assert-HiddenLauncherAvailable
     if ([string]::IsNullOrWhiteSpace($AcceptanceReceipt) -or -not (Test-Path -LiteralPath $AcceptanceReceipt -PathType Leaf)) { throw 'Install requires the successful Windows loopback acceptance receipt' }
     $acceptance = ([IO.File]::ReadAllText($AcceptanceReceipt) | ConvertFrom-Json)
     if ($acceptance.passed -ne $true -or $acceptance.platform -ne 'win32' -or $acceptance.computerName -ine $ExpectedComputerName -or $acceptance.verifiedIdentity -ine $identity.Name -or $acceptance.harnessSha256 -ine $HarnessSha256 -or $acceptance.bundleSha256 -ine $ExpectedSha256 -or $acceptance.deviceVersion -ne $version -or @($acceptance.cases).Count -ne 10 -or @($acceptance.cases | Where-Object { $_.passed -ne $true }).Count -ne 0) { throw 'Acceptance receipt does not validate this computer and exact candidate' }
@@ -234,14 +442,38 @@ try {
     if ($null -ne $oldTask -and -not (Managed-Task $oldTask)) { throw 'The requested task name belongs to an unmanaged task; no task definition was replaced' }
     if ($null -ne $oldTask -and ([string]$oldTask.Principal.LogonType) -notin @('Interactive','InteractiveToken')) { throw 'Existing task requires a different logon authorization; automatic replacement was stopped' }
     $processes = @(Owned-RelayProcesses)
-    $legacy = @($processes | Where-Object { $_.Legacy })
-    $managed = @($processes | Where-Object { $_.Managed })
-    if ($managed.Count -gt 0) {
-        if ($null -eq $oldTask -or -not (Managed-Task $oldTask)) { throw 'Managed relay is active without the expected task; no process was stopped' }
+    $migration = Select-RelayLauncherTree $processes
+    $legacy = @()
+    if ($null -ne $migration) { $legacy = @($migration.Root) }
+    # Release workers below an npx launcher do not imply a Scheduled Task exists.
+    # Only a verified managed bootstrap rooted in that task is already installed.
+    if ($null -ne $migration -and $migration.Root.Bootstrap -and $null -ne $oldTask -and [string]$oldTask.State -eq 'Running') {
         & $NodePath $bootstrapEntry update-check --config $ConfigPath | Out-Null
         $status = Read-Status
         if ($null -ne $status -and $status.phase -eq 'running' -and $status.sha256 -ieq $ExpectedSha256 -and $status.supervisorVersion -eq $version) {
             if ($RequireOtaProof -and $status.previousVersion -ne $bootstrapVersion) { throw 'The active relay lacks the requested bootstrap-to-stable evidence' }
+            # Replace only the next-start action of older console-host tasks.
+            # Their current relay and terminal processes are left running.
+            $oldActions=@($oldTask.Actions)
+            if ($oldActions.Count -ne 1) { throw 'Managed task has an unexpected action count; no action was changed' }
+            if ((Canonical ([string]$oldActions[0].Execute)) -ne (Canonical $windowsScriptHost)) {
+                if ((Canonical ([string]$oldActions[0].Execute)) -notin @((Canonical $windowsPowerShell),(Canonical $NodePath))) { throw 'Managed task uses an unrecognized executable; no action was changed' }
+                $actionBackupDir=Join-Path $InstallRoot ('backups\hidden-action-'+[DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')+'-'+[Guid]::NewGuid().ToString('N'))
+                [IO.Directory]::CreateDirectory($actionBackupDir) | Out-Null
+                $actionBackup=Join-Path $actionBackupDir 'previous-task.xml'
+                [IO.File]::WriteAllText($actionBackup,(Export-ScheduledTask -TaskPath '\' -TaskName $TaskName),(New-Object Text.UTF8Encoding($false)))
+                $actionWorkingDirectory=[string]$oldActions[0].WorkingDirectory
+                if ([string]::IsNullOrWhiteSpace($actionWorkingDirectory)) { $actionWorkingDirectory=$RelayRoot }
+                $oldArguments=@(Split-WindowsCommandLine ([string]$oldActions[0].Arguments))
+                $hiddenExisting=Join-Path $actionBackupDir 'start-relay-hidden.vbs'
+                [IO.File]::WriteAllText($hiddenExisting,(Hidden-Launcher ([string]$oldActions[0].Execute) $oldArguments $actionWorkingDirectory),[Text.Encoding]::Unicode)
+                $hiddenAction=New-ScheduledTaskAction -Execute $windowsScriptHost -Argument ('//B //NoLogo '+(Windows-Quote $hiddenExisting)) -WorkingDirectory $actionWorkingDirectory
+                Set-ScheduledTask -TaskPath '\' -TaskName $TaskName -Action $hiddenAction | Out-Null
+                $report.taskActionUpdated=$true
+                $report.taskActionBackup=$actionBackup
+                $report.taskActionBackupSha256=Hash $actionBackup
+            }
+            $report.launcherMode='hidden-gui-host'
             $report.phase='already-managed'; $report.passed=$true; $report.runtimeVersion=$status.version; $report.supervisorVersion=$status.supervisorVersion
             $report.runtimeSha256=$status.sha256; $report.otaProven=($BootstrapSha256 -ine $ExpectedSha256 -and $status.previousVersion -eq $bootstrapVersion)
             Save-Json $ReceiptPath $report
@@ -250,7 +482,6 @@ try {
         }
         throw 'Existing managed relay retains ownership; an update check was requested and the installer will retry later'
     }
-    if ($legacy.Count -gt 1) { throw 'Multiple matching legacy relays require explicit reconciliation; none was stopped' }
     Copy-Verified $stagedBootstrap $bootstrapEntry $BootstrapSha256
     $backupDir = Join-Path $InstallRoot ('backups\' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))
     [IO.Directory]::CreateDirectory($backupDir) | Out-Null
@@ -289,23 +520,40 @@ try {
     }
     $legacyArgs = @('connect','--root',$RelayRoot,'--config',$ConfigPath,'--name',$deviceName,'--packs',$Packs)
     if ($AllowKernel) { $legacyArgs += '--allow-kernel' }
+    if ($AllowComputer) { $legacyArgs += '--allow-computer' }
+    if ($null -ne $migration) {
+        $legacyArgs = @(Migration-Arguments $migration)
+        if ($migration.Values.ContainsKey('url') -and ([string]$migration.Values['url']).TrimEnd('/') -ine $ExpectedRelayUrl.TrimEnd('/')) { throw 'Running relay belongs to another server; no process was stopped' }
+        if ($migration.Values.ContainsKey('update-manifest') -and $migration.Values['update-manifest'] -ine $ManifestUrl) { throw 'Running relay uses a different update channel; pass that verified ManifestUrl to preserve it' }
+        $report.migratedProcessCount=$migration.Processes.Count
+        $report.migratedLauncherId=$migration.Root.Id
+    }
     $journal = [ordered]@{
-        schemaVersion=1; phase='prepared'; computerName=$env:COMPUTERNAME; identity=$identity.Name
+        schemaVersion=1; phase='prepared'; computerName=[Environment]::MachineName; identity=$identity.Name
         configSha256=$configHash; bundleSha256=$ExpectedSha256.ToLowerInvariant(); bootstrapSha256=$BootstrapSha256.ToLowerInvariant()
         taskWasPresent=($null -ne $oldTask); taskWasRunning=($null -ne $oldTask -and [string]$oldTask.State -eq 'Running')
         taskBackup=$taskBackup; taskBackupSha256=$taskBackupHash
         legacyWasRunning=($legacy.Count -eq 1); legacyEntryPoint=$legacySource; legacyRestoreEntryPoint=$legacyBackup
         legacySha256=$legacyDigest
+        legacyProcessId=$(if ($legacy.Count -eq 1) { $legacy[0].Id } else { $null })
+        legacyProcessCreatedAt=$(if ($legacy.Count -eq 1) { $legacy[0].CreatedAt } else { $null })
         legacyArgs=$legacyArgs; startedAt=[DateTime]::UtcNow.ToString('o')
     }
     Save-Json $journalPath $journal
     $transactionStarted=$true
-    $arguments = @('connect','--root',$RelayRoot,'--config',$ConfigPath,'--name',$deviceName,'--packs',$Packs,'--update-manifest',$ManifestUrl,'--update-interval',[string]$UpdateIntervalSeconds)
-    if ($AllowKernel) { $arguments += '--allow-kernel' }
+    $arguments = @(Managed-Arguments $migration $legacyArgs)
     $startCode = Node-Invocation $bootstrapEntry $arguments (Join-Path $InstallRoot 'relay.log')
     [IO.File]::WriteAllText((Join-Path $InstallRoot 'start-relay.ps1'),$startCode,(New-Object Text.UTF8Encoding($false)))
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($startCode))
-    $action = New-ScheduledTaskAction -Execute $windowsPowerShell -Argument ('-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ' + $encoded) -WorkingDirectory $RelayRoot
+    # The task itself is a GUI host; a console application with WindowStyle Hidden
+    # can still flash its console before applying that flag.
+    $hiddenLauncher=Join-Path $backupDir 'start-relay-hidden.vbs'
+    $hiddenCode=Hidden-Launcher $windowsPowerShell @('-NoLogo','-NoProfile','-NonInteractive','-WindowStyle','Hidden','-EncodedCommand',$encoded) $RelayRoot
+    [IO.File]::WriteAllText($hiddenLauncher,$hiddenCode,[Text.Encoding]::Unicode)
+    $journal.hiddenLauncher=$hiddenLauncher
+    $journal.hiddenLauncherSha256=Hash $hiddenLauncher
+    Save-Json $journalPath $journal
+    $action = New-ScheduledTaskAction -Execute $windowsScriptHost -Argument ('//B //NoLogo '+(Windows-Quote $hiddenLauncher)) -WorkingDirectory $RelayRoot
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity.Name
     $principal = New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
@@ -317,28 +565,40 @@ try {
     $journal.phase='registered'; Save-Json $journalPath $journal
     if ((Hash $ConfigPath) -ne $configHash) { throw 'Configuration changed before the switch; stopped without touching its contents' }
     if ($legacy.Count -eq 1) {
-        $stillOwned = @(Owned-RelayProcesses | Where-Object { $_.Legacy -and $_.Id -eq $legacy[0].Id })
-        if ($stillOwned.Count -ne 1) { throw 'Legacy process identity changed before the switch; no process was terminated' }
+        $stillOwned = Select-RelayLauncherTree @(Owned-RelayProcesses)
+        if ($null -eq $stillOwned -or $stillOwned.Root.Id -ne $legacy[0].Id -or $stillOwned.Root.CreatedAt -ne $legacy[0].CreatedAt -or (Canonical $stillOwned.Root.Entry) -ne (Canonical $journal.legacyEntryPoint)) { throw 'Legacy process identity changed before the switch; no process was terminated' }
         if ((Hash $journal.legacyEntryPoint) -ne $journal.legacySha256) { throw 'Legacy entry changed before the switch' }
+        if ((@(Migration-Arguments $stillOwned) | ConvertTo-Json -Compress) -ne ($legacyArgs | ConvertTo-Json -Compress)) { throw 'Relay settings changed before the switch; no process was terminated' }
         $journal.phase='switching'; Save-Json $journalPath $journal
+        # Stop only the verified launcher. Its supervisor and worker observe IPC
+        # disconnect and shut down; never taskkill a broad Node/npm process tree.
         Stop-Process -Id $legacy[0].Id -Force -ErrorAction Stop
         $legacyStopped=$true
-        $deadline=[DateTime]::UtcNow.AddSeconds(10)
-        while (@(Owned-RelayProcesses | Where-Object { $_.Legacy }).Count -gt 0) {
-            if ([DateTime]::UtcNow -gt $deadline) { throw 'The targeted legacy relay did not stop' }
+        $deadline=[DateTime]::UtcNow.AddSeconds(20)
+        while (@(Owned-RelayProcesses).Count -gt 0) {
+            if ([DateTime]::UtcNow -gt $deadline) { throw 'The verified relay tree did not finish shutting down; no remaining process was force-stopped' }
             Start-Sleep -Milliseconds 200
         }
     }
     $journal.phase='starting'; Save-Json $journalPath $journal
     Enable-ScheduledTask -TaskPath '\' -TaskName $TaskName | Out-Null
+    $taskStartedAt=[DateTime]::UtcNow
+    $taskStartedMs=([DateTimeOffset]$taskStartedAt).ToUnixTimeMilliseconds()
     Start-ScheduledTask -TaskPath '\' -TaskName $TaskName
     $deadline=[DateTime]::UtcNow.AddSeconds($HealthTimeoutSeconds)
     $healthy=$false; $status=$null
     do {
         Start-Sleep -Milliseconds 500
         $status=Read-Status
-        if ($null -ne $status -and $status.phase -eq 'running' -and $status.sha256 -ieq $ExpectedSha256 -and $status.version -eq $version -and $status.supervisorVersion -eq $version) {
-            if (-not $RequireOtaProof -or $status.previousVersion -eq $bootstrapVersion) { $healthy=$true; break }
+        if ($null -ne $status -and $status.phase -eq 'running' -and $status.sha256 -ieq $ExpectedSha256 -and $status.version -eq $version -and $status.supervisorVersion -eq $version -and $status.updatedAt -ge $taskStartedMs) {
+            # A stale state file is not evidence that this Scheduled Task started.
+            # Bind health to a new, verified bootstrap/supervisor/worker tree.
+            $healthyTree=$null
+            try { $healthyTree=Select-RelayLauncherTree @(Owned-RelayProcesses) } catch { continue }
+            $runningTask=Existing-Task
+            if ($null -ne $healthyTree -and $healthyTree.Root.Bootstrap -and $healthyTree.Processes.Count -eq 3 -and $healthyTree.Root.EntrySha256 -eq $BootstrapSha256.ToLowerInvariant() -and ([DateTime]$healthyTree.Root.CreatedAt).ToUniversalTime() -ge $taskStartedAt -and $null -ne $runningTask -and [string]$runningTask.State -eq 'Running') {
+                if (-not $RequireOtaProof -or $status.previousVersion -eq $bootstrapVersion) { $healthy=$true; break }
+            }
         }
     } while ([DateTime]::UtcNow -lt $deadline)
     if (-not $healthy) { throw 'New launcher did not prove authenticated stable worker and supervisor activation before the deadline' }
@@ -347,6 +607,8 @@ try {
     $report.phase='active'; $report.passed=$true; $report.runtimeVersion=$status.version; $report.supervisorVersion=$status.supervisorVersion
     $report.runtimeSha256=$status.sha256; $report.otaProven=($BootstrapSha256 -ine $ExpectedSha256 -and $status.previousVersion -eq $bootstrapVersion)
     $report.taskName=$TaskName; $report.logonPersistence='current-user interactive logon'; $report.journal=$journalPath
+    $report.launcherPid=$healthyTree.Root.Id; $report.workerPid=$healthyTree.Processes[2].Id
+    $report.taskStartedAt=$taskStartedAt.ToString('o'); $report.stateUpdatedAt=$status.updatedAt
     Save-Json $ReceiptPath $report
     $report | ConvertTo-Json -Depth 10 -Compress
     exit 0

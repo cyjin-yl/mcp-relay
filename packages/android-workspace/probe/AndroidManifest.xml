@@ -1,0 +1,6 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.cyjin.mcprelay.workspaceprobe" android:versionCode="1" android:versionName="1">
+  <uses-sdk android:minSdkVersion="34" android:targetSdkVersion="34" />
+  <application android:label="Relay Workspace Probe" android:allowBackup="false" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+    <activity android:name=".ProbeActivity" android:exported="true" android:resizeableActivity="true" android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|density|keyboard|keyboardHidden" />
+  </application>
+</manifest>

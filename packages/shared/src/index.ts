@@ -85,8 +85,11 @@ export type CallMessage = {
   tool: string;
   args: JsonObject;
   timeoutMs: number;
+  /** Authenticated server dispatch context; token material is never forwarded. */
+  caller?: { ownerKey: string; authorizationExpiresAt: number };
 };
 
+export type WorkspaceRevokeMessage = { type: "workspace_revoke"; ownerKey: string };
 export type PingMessage = { type: "ping" };
 export type PongMessage = { type: "pong" };
 
@@ -96,7 +99,7 @@ export type ResultMessage =
   | { type: "result"; id: string; ok: true; result: CallToolResult }
   | { type: "result"; id: string; ok: false; error: DeviceError };
 
-export type ServerToDevice = HelloAckMessage | CallMessage | PingMessage;
+export type ServerToDevice = HelloAckMessage | CallMessage | PingMessage | WorkspaceRevokeMessage;
 export type DeviceToServer = HelloMessage | PongMessage | ResultMessage;
 
 export function hashText(value: string): string {
@@ -119,6 +122,6 @@ export function deviceToolName(slug: string, tool: string): string {
 }
 
 export function requiredScope(tool: Pick<ToolDescriptor, "annotations"> & Partial<Pick<ToolDescriptor, "name">>): Scope {
-  if (tool.name === "computer_action" || tool.name === "computer_handoff" || tool.name === "computer_setup") return SCOPE_WRITE;
+  if (tool.name === "computer_action" || tool.name === "computer_handoff" || tool.name === "computer_setup" || tool.name === "computer_session") return SCOPE_WRITE;
   return tool.annotations?.readOnlyHint === true ? SCOPE_READ : SCOPE_WRITE;
 }

@@ -159,6 +159,7 @@ func (a *App) apiRevokeShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.cancelShareCalls(id)
+	a.revokeWorkspaceShare(sc.User.ID, id)
 	a.store.Audit(sc.User.ID, "share:"+id, "", "share.revoke", "", "ok", "", 0)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

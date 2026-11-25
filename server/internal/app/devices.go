@@ -157,14 +157,21 @@ func toolExecutionTimeout(tool string, args json.RawMessage) time.Duration {
 	}
 	budget := 30 * time.Second
 	var input struct {
-		TimeoutMS *int64 `json:"timeout_ms"`
+		TimeoutMS         *int64 `json:"timeout_ms"`
+		Operation         string `json:"operation"`
+		InteractiveSignIn bool   `json:"interactive_sign_in"`
 	}
 	minimumTimeoutMS := int64(1000)
 	if isComputerTool(tool) {
 		minimumTimeoutMS = 1
 	}
-	if json.Unmarshal(args, &input) == nil && input.TimeoutMS != nil && *input.TimeoutMS >= minimumTimeoutMS && *input.TimeoutMS <= 120000 {
-		budget = time.Duration(*input.TimeoutMS) * time.Millisecond
+	if json.Unmarshal(args, &input) == nil {
+		if tool == "computer_session" && input.Operation == "open" && input.InteractiveSignIn {
+			budget = 120 * time.Second
+		}
+		if input.TimeoutMS != nil && *input.TimeoutMS >= minimumTimeoutMS && *input.TimeoutMS <= 120000 {
+			budget = time.Duration(*input.TimeoutMS) * time.Millisecond
+		}
 	}
 	if isComputerTool(tool) {
 		// Windows taskkill and native pipe cleanup may take up to two seconds.
@@ -253,10 +260,14 @@ func (d *LiveDevice) sendCall(ctx context.Context, deadline time.Time, id, tool 
 		writeDeadline = deadline
 	}
 	_ = d.conn.SetWriteDeadline(writeDeadline)
-	return d.conn.WriteJSON(map[string]any{
+	message := map[string]any{
 		"type": "call", "id": id, "tool": tool, "args": args,
 		"timeoutMs": remaining.Milliseconds(),
-	})
+	}
+	if caller, ok := ctx.Value(deviceCallerContextKey{}).(deviceCaller); ok {
+		message["caller"] = caller
+	}
+	return d.conn.WriteJSON(message)
 }
 
 func (d *LiveDevice) cancelCall(id string) {

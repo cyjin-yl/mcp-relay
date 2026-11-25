@@ -97,7 +97,7 @@ class Attempt:
             "[Console]::OutputEncoding = $relayEncoding",
             "$OutputEncoding = $relayEncoding",
             "$relayIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name",
-            "if ($env:COMPUTERNAME -ine " + ps_quote(self.args.expected_computer_name)
+            "if ([Environment]::MachineName -ine " + ps_quote(self.args.expected_computer_name)
             + " -or $relayIdentity -ine " + ps_quote(self.args.expected_identity)
             + ") { throw 'Unexpected Windows computer/account; no deployment action performed' }",
         ]) + "\n"
@@ -233,7 +233,7 @@ class Attempt:
             "$node = " + node_expression,
             "if ($node -match '[\\\\/]fnm_multishells[\\\\/]' -or -not (Test-Path -LiteralPath $node -PathType Leaf)) { throw 'Verified stable Node executable is unavailable' }",
             "$stage = Join-Path ([IO.Path]::GetTempPath()) " + ps_quote("mcp-relay-deploy-" + self.run_id),
-            "[ordered]@{ online=$true; computerName=$env:COMPUTERNAME; identity=$relayIdentity; stage=$stage; node=$node } | ConvertTo-Json -Compress",
+            "[ordered]@{ online=$true; computerName=[Environment]::MachineName; identity=$relayIdentity; stage=$stage; node=$node } | ConvertTo-Json -Compress",
         ]))
         self.remote_stage, self.node_path = probe["stage"], probe["node"]
         self.report["remoteStage"] = self.remote_stage

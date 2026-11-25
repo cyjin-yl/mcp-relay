@@ -41,7 +41,8 @@ export function shellEnvironment(
     // per name so Node does not pick a different duplicate PATH entry.
     keys.push("SYSTEMROOT", "WINDIR", "COMSPEC", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
       "TEMP", "TMP", "PATHEXT", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432",
-      "SYSTEMDRIVE", "PSMODULEPATH", "PSMODULEANALYSISCACHEPATH");
+      "SYSTEMDRIVE", "PSMODULEPATH", "PSMODULEANALYSISCACHEPATH",
+      "COMPUTERNAME", "USERNAME", "USERDOMAIN", "USERDOMAIN_ROAMINGPROFILE", "HOMEDRIVE", "HOMEPATH");
   }
   for (const key of keys) {
     const value = environmentValue(source, key, platform);
@@ -177,7 +178,7 @@ function powershellArguments(command: string): string[] {
     "exit 1",
     "}"
   ].join("\n");
-  return ["-NoLogo", "-NoProfile", "-NonInteractive",
+  return ["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
     "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")];
 }
 

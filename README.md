@@ -43,6 +43,6 @@ resource metadata.
 See [docs/CONNECT.md](docs/CONNECT.md) for ChatGPT/Claude setup and
 [docs/RUNBOOK.md](docs/RUNBOOK.md) for operations.
 
-See [Native computer use](docs/computer-use.md) for screen/input capabilities, explicit enablement, platform requirements, handoff, and update behavior.
+See [Native computer use](docs/computer-use.md) for selectable foreground and isolated computer control, explicit enablement, platform requirements, timeout recovery, handoff, and update behavior.
 
 See [Temporary device sharing](docs/TEMPORARY_SHARES.md) for handing selected devices to another agent, the claim API, expiry, revocation, and verification.

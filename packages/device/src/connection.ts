@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import type { WorkspaceTransport } from "./computer/workspace-types.js";
 import { hostname, platform as osPlatform, arch as osArch } from "node:os";
 import WebSocket from "ws";
 import { MAX_DEVICE_MESSAGE_BYTES, type CallToolResult, type JsonObject } from "@mcp-relay/shared";
@@ -39,7 +41,8 @@ type DeviceMessage =
   | { type: "hello_ack"; deviceId: string; slug: string; serverTime: number }
   | { type: "ping" }
   | { type: "cancel"; id: string }
-  | { type: "call"; id: string; tool: string; args?: JsonObject; timeoutMs?: number };
+  | { type: "workspace_revoke"; ownerKey: string }
+  | { type: "call"; id: string; tool: string; args?: JsonObject; timeoutMs?: number; caller?: { ownerKey: string; authorizationExpiresAt: number } };
 
 export async function runConnection(options: ConnectionOptions): Promise<number> {
   const executor = buildExecutor(options.packs);
@@ -130,6 +133,15 @@ export async function runConnection(options: ConnectionOptions): Promise<number>
 
   try {
     while (!stopping) {
+      const transportAbort = new AbortController();
+      let lastServerMessageAt = Date.now();
+      const transport: WorkspaceTransport = { epoch: randomUUID(), authenticated: false, signal: transportAbort.signal, lastServerMessageAt: () => lastServerMessageAt };
+      const invalidateTransport = () => {
+        if (transportAbort.signal.aborted) return;
+        transport.authenticated = false;
+        transportAbort.abort();
+        for (const pack of options.packs) pack.connectionClosed?.(transport.epoch);
+      };
       const callIds = new Set<string>();
       const cancelSessionCalls = () => {
         for (const id of callIds) scheduler.cancel(id);
@@ -150,6 +162,7 @@ export async function runConnection(options: ConnectionOptions): Promise<number>
         maxPayload: 1024 * 1024
       });
       stopCurrentSession = () => {
+        invalidateTransport();
         if (ws.readyState === WebSocket.OPEN) {
           ws.close(1000, "device update");
           const timer = setTimeout(() => ws.terminate(), 2000);
@@ -220,6 +233,11 @@ export async function runConnection(options: ConnectionOptions): Promise<number>
         let message: DeviceMessage;
         try { message = JSON.parse(raw.toString()) as DeviceMessage; }
         catch { return; }
+        lastServerMessageAt = Date.now();
+        if (message.type === "workspace_revoke" && typeof message.ownerKey === "string") {
+          for (const pack of options.packs) void pack.revokeWorkspaceOwner?.(message.ownerKey).catch(() => { options.log("workspace revocation is pending local watchdog recovery"); });
+          return;
+        }
         if (message.type === "ping") { void send({ type: "pong" }); return; }
         if (message.type === "hello_ack") {
           if (message.deviceId !== options.config.deviceId || message.slug !== options.config.slug) {
@@ -228,6 +246,7 @@ export async function runConnection(options: ConnectionOptions): Promise<number>
             ws.terminate();
             return;
           }
+          transport.authenticated = true;
           options.log(`relay registered device ${message.slug}`);
           options.control?.send({ type: "relay:ready", version: options.version, slug: message.slug });
           return;
@@ -253,9 +272,10 @@ export async function runConnection(options: ConnectionOptions): Promise<number>
         const args = message.args && typeof message.args === "object" ? message.args : {};
         // Handoff is a control operation that must be able to cancel an active UI writer.
         // Its descriptor and server authorization remain write-scoped.
-        const concurrentControl = message.tool === "computer_handoff";
+        const concurrentControl = message.tool === "computer_handoff"
+          || (message.tool === "computer_session" && ["close", "renew", "status"].includes(String(args.operation)));
         void scheduler.schedule(message.id, readOnlyTools.has(message.tool) || concurrentControl, timeoutMs,
-          (signal) => executor.call(message.tool, args, { ...context, signal }))
+          (signal) => executor.call(message.tool, args, { ...context, signal, connection: transport, ...(message.caller ? { caller: message.caller } : {}) }))
           .then(async (result) => {
             await send({ type: "result", id: message.id, ok: true, result });
             options.log(`${message.tool} ok ${Date.now() - receivedAt}ms`);
@@ -273,6 +293,7 @@ export async function runConnection(options: ConnectionOptions): Promise<number>
       });
 
       ws.on("close", (code, reason) => {
+        invalidateTransport();
         cancelSessionCalls();
         options.log(`disconnected code=${code}${reason.length > 0 ? ` reason=${reason.toString()}` : ""}`);
         settle(stopping ? "stopped" : code === 4001 || code === 4003 || code === 1008 ? "fatal" : "retry");
@@ -283,6 +304,7 @@ export async function runConnection(options: ConnectionOptions): Promise<number>
       });
 
       const outcome = await promise;
+      invalidateTransport();
       stopCurrentSession = undefined;
       cancelSessionCalls();
       if (outcome === "stopped" || stopping) return 0;
@@ -305,6 +327,7 @@ export async function runConnection(options: ConnectionOptions): Promise<number>
     scheduler.close();
     // Keep the process-generation lock until aborted operations really finish.
     await scheduler.waitForIdle();
+    await Promise.allSettled(options.packs.map(pack => pack.dispose?.()));
   }
 }
 

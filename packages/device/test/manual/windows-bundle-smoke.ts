@@ -67,6 +67,7 @@ async function main(): Promise<void> {
   const subdir = join(root, "中文 子目录");
   mkdirSync(subdir, { recursive: true });
   const cases: Array<{ name: string; passed: boolean; durationMs: number; error?: string }> = [];
+  const treeReplies: Record<string, Envelope> = {};
   let worker: ChildProcess | undefined;
   let wire: WebSocket | undefined;
   let workerLog = "";
@@ -125,11 +126,26 @@ async function main(): Promise<void> {
   const treeCommand = (name: string) => {
     const marker = join(root, name + "-started.json");
     const late = join(root, name + "-late.txt");
+    const childFile = join(root, name + "-grandchild.cjs");
+    const parentFile = join(root, name + "-parent.cjs");
     const childCode = "setTimeout(()=>require('node:fs').writeFileSync(" + JSON.stringify(late) + ",'unexpected'),4500)";
-    const code = "const fs=require('node:fs');const child=require('node:child_process').spawn(process.execPath,['-e'," +
-      JSON.stringify(childCode) + "],{stdio:'ignore'});fs.writeFileSync(" + JSON.stringify(marker) +
+    const code = "const fs=require('node:fs');const child=require('node:child_process').spawn(process.execPath,[" +
+      JSON.stringify(childFile) + "],{stdio:'ignore',windowsHide:true});fs.writeFileSync(" + JSON.stringify(marker) +
       ",JSON.stringify({parent:process.pid,child:child.pid}));setTimeout(()=>{},8500)";
-    return { marker, late, command: "& " + psQuote(process.execPath) + " -e " + psQuote(code) };
+    // PS5.1 legacy native argument passing strips nested quotes from node -e.
+    // Files preserve the actual parent/grandchild fixture on both native runtimes.
+    writeFileSync(childFile, childCode + "\n", { flag: "wx" });
+    writeFileSync(parentFile, code + "\n", { flag: "wx" });
+    return { name, marker, late, command: "& " + psQuote(process.execPath) + " " + psQuote(parentFile) };
+  };
+  const waitForTree = async (fixture: ReturnType<typeof treeCommand>, pending: ReturnType<typeof begin>, label: string) => {
+    void pending.promise.then((reply) => { treeReplies[fixture.name] = reply; }, () => {});
+    await until(() => {
+      if (existsSync(fixture.marker)) return true;
+      const reply = treeReplies[fixture.name];
+      if (reply) throw new Error(label + " exited before readiness: " + JSON.stringify(reply));
+      return false;
+    }, 3500, label);
   };
 
   try {
@@ -137,7 +153,7 @@ async function main(): Promise<void> {
       "--packs", "minimal,omp", "--no-auto-update"], {
       execArgv: [], windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
       env: { ...process.env, MCP_RELAY_WORKER: "1", MCP_RELAY_START_DRAINED: "0",
-        MCP_RELAY_SUPERVISOR: "0", MCP_RELAY_LAUNCHED: "0", MCP_RELAY_SMOKE_SECRET: "must-not-forward" }
+        MCP_RELAY_SUPERVISOR: "0", MCP_RELAY_LAUNCHED: "0", COMPUTERNAME: hostname(), MCP_RELAY_SMOKE_SECRET: "must-not-forward" }
     });
     worker.stderr!.on("data", (data: Buffer) => { workerLog = (workerLog + data.toString()).slice(-64000); });
     worker.stdout!.on("data", (data: Buffer) => { workerLog = (workerLog + data.toString()).slice(-64000); });
@@ -157,7 +173,7 @@ async function main(): Promise<void> {
     });
     await check("Unicode, quotes, cwd and environment filtering", async () => {
       const result = await call("powershell", { cwd: "中文 子目录", command:
-        "[pscustomobject]@{unicode='中文🙂 \"quoted\"';root=(Get-Location).Path;version=$PSVersionTable.PSVersion.ToString();marker=$env:MCP_RELAY;secret=$env:MCP_RELAY_SMOKE_SECRET}|ConvertTo-Json -Compress" });
+        "[pscustomobject]@{unicode='中文🙂 \"quoted\"';root=(Get-Location).Path;version=$PSVersionTable.PSVersion.ToString();marker=$env:MCP_RELAY;computer=$env:COMPUTERNAME;identity=[Security.Principal.WindowsIdentity]::GetCurrent().Name;machine=[Environment]::MachineName;secret=$env:MCP_RELAY_SMOKE_SECRET}|ConvertTo-Json -Compress" });
       assert.notEqual(result.isError, true, text(result));
       const object = JSON.parse(stdout(result));
       assert.equal(object.unicode, '中文🙂 "quoted"');
@@ -165,6 +181,9 @@ async function main(): Promise<void> {
       // Compare the actual filesystem identity without relaxing the cwd boundary.
       assert.equal(realpathSync.native(object.root).toLowerCase(), realpathSync.native(subdir).toLowerCase());
       assert.equal(object.marker, "1");
+      assert.equal(object.computer.toLowerCase(), hostname().toLowerCase());
+      assert.equal(object.machine.toLowerCase(), hostname().toLowerCase());
+      assert.equal(typeof object.identity, "string");
       assert(!object.secret);
     });
     await check("native executable nonzero exit code is preserved", async () => {
@@ -199,7 +218,7 @@ async function main(): Promise<void> {
     await check("execution deadline terminates the complete Windows process tree", async () => {
       const fixture = treeCommand("timeout");
       const pending = begin("powershell", { command: fixture.command, timeout_ms: 1800 });
-      await until(() => existsSync(fixture.marker), 3500, "timeout test process tree");
+      await waitForTree(fixture, pending, "timeout test process tree");
       const reply = await pending.promise;
       assert.equal(reply.ok, true);
       assert.equal(reply.result?.isError, true);
@@ -210,7 +229,7 @@ async function main(): Promise<void> {
     await check("wire cancellation terminates the tree before the next writer runs", async () => {
       const fixture = treeCommand("cancel");
       const pending = begin("powershell", { command: fixture.command, timeout_ms: 10000 });
-      await until(() => existsSync(fixture.marker), 3500, "cancel test process tree");
+      await waitForTree(fixture, pending, "cancel test process tree");
       wire!.send(JSON.stringify({ type: "cancel", id: pending.id }));
       const reply = await pending.promise;
       assert(reply.ok === false || reply.result?.isError === true);
@@ -268,7 +287,7 @@ async function main(): Promise<void> {
     await new Promise<void>((done) => server.close(() => done()));
     const report = { platform: process.platform, computerName: hostname(), completedAt: new Date().toISOString(), node: process.version, bundle, evidence,
       bundleSha256: createHash("sha256").update(readFileSync(bundle)).digest("hex"),
-      deviceVersion: registration?.device?.version, tools: registration?.tools?.map((tool) => tool.name), cases,
+      deviceVersion: registration?.device?.version, tools: registration?.tools?.map((tool) => tool.name), cases, treeReplies,
       passed: cases.length === 10 && cases.every((item) => item.passed), workerLog };
     writeFileSync(join(evidence, "acceptance.json"), JSON.stringify(report, null, 2));
     process.stdout.write(JSON.stringify(report, null, 2) + "\n");

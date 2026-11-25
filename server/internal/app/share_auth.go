@@ -113,6 +113,7 @@ func (a *App) cancelShareCalls(shareID string) {
 }
 
 func (a *App) callAuthorizedDevice(ctx context.Context, token *VerifiedToken, device *LiveDevice, tool Tool, args json.RawMessage) (CallToolResult, error) {
+	ctx = withWorkspaceCaller(ctx, token)
 	if token.ShareID != "" {
 		var release func()
 		var err error
