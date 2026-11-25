@@ -112,6 +112,48 @@ Only after that receipt passes does a new invocation perform the switch:
 
 The new task runs with the current user's limited interactive identity and starts at that user's logon. It is not a system boot service for a logged-out user. The script never elevates, prompts for credentials, changes execution policy or terminates processes by the generic name `node.exe`. A legacy process from an unknown package path is a stop condition, not a reason to broaden the process selector.
 
+## Explicit computer opt-in
+
+`--add-computer` is an explicit, optional Install request, forwarded as the
+PowerShell `-AddComputer` switch. It defaults to false. Use a reviewed candidate
+with `computer-status`, `computer-enable` and safe worker reload support. Stage
+does not enable computer control.
+
+The installer preserves the verified running tree's packs and known arguments,
+then adds `computer` and `--allow-computer` to the managed startup target. Existing
+kernel permissions, shell policy, device name and update options stay intact.
+The recovery journal retains the original arguments. Unknown arguments remain a
+stop condition before the running tree is changed.
+
+For an already-managed relay, the installer updates only its next-start action.
+It saves the original task XML and SHA-256, writes a hidden WScript launcher, and
+checks the action and launcher content after writing. Failed readback restores
+the previous action when it still owns the change. Concurrent task edits require
+reconciliation using the saved XML.
+
+After the exact managed runtime is healthy, the installer reads the computer
+sidecar. If disabled, it invokes `computer-enable` once. This saves opt-in and
+requests the supervisor's safe drain; it does not force-stop a worker or resume a
+local pause. If already enabled, a retry reads the current tree and settings
+without issuing another enable or reload.
+
+The computer receipt reports `enabled` and `paused` separately. Local pack proof
+requires the exact ready worker and either an explicit computer pack in its argv,
+a completed reload matching the settings revision, or a new worker created after
+the enabled setting was saved. This accounts for safe reloads whose process argv
+still lists the supervisor's original packs. A later pause revision may leave
+implicit-pack proof pending; it is not a reason to repeat enable.
+
+If safe drain or local pack proof remains pending, the receipt has
+`phase: capability-pending` and `installationCommitted: true`, and the helper exits
+75. The healthy installation, task action and saved settings remain in place.
+Check the preserved receipt before another bounded attempt. Successful local
+proof still records `registrationVerified: false`: fresh server MCP discovery
+must independently confirm the advertised computer tools.
+
+Keep attempt receipts outside the source checkout, using `--output-dir` with the
+private operations evidence directory selected for the deployment.
+
 ## Readback and successful completion
 
 The helper reads `acceptance-receipt.json` and `install-receipt.json` back through the same strict SSH channel. Its local attempt directory is `.tmp/windows-deployment/<UTC-time>-<random-id>/`. It saves input digests, each step's JSON, both readback receipts and `attempt-receipt.json`, with private permissions. The final stdout contains only a short status and the local receipt path.

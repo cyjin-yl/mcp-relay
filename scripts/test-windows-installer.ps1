@@ -2,13 +2,13 @@
 param([string]$InstallerPath = (Join-Path $PSScriptRoot 'install-windows.ps1'))
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-# Load only pure decision functions. The installer body and all mutating process,
-# task, file and registry operations remain unexecuted throughout these tests.
+# Load only named functions. The installer body is never executed. Task/process
+# operations are mocked; task-action tests use only their own temporary files.
 $tokens=$null
 $parseErrors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($InstallerPath,[ref]$tokens,[ref]$parseErrors)
 if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
-$names=@('Windows-Quote','Vbs-Quote','Hidden-Launcher','Canonical','Split-WindowsCommandLine','Relay-Options','Owned-RelayProcesses','Select-RelayLauncherTree','Migration-Arguments','Managed-Arguments')
+$names=@('Windows-Quote','Vbs-Quote','Hidden-Launcher','Canonical','Split-WindowsCommandLine','Relay-Options','Owned-RelayProcesses','Select-RelayLauncherTree','Migration-Arguments','Managed-Arguments','Add-ComputerArguments','Hash','Ps-Quote','Node-Invocation','Update-ComputerTaskAction','Same-TaskAction','Read-ComputerActivation','Ensure-ComputerActivation','Complete-ComputerOptIn')
 foreach ($name in $names) {
     $functionAst=$ast.Find({ param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name },$true)
     if ($null -eq $functionAst) { throw ('Missing installer function '+$name) }
@@ -16,6 +16,7 @@ foreach ($name in $names) {
 }
 $RelayRoot='C:\Users\ezra'
 $ConfigPath='C:\Users\ezra\.mcp-relay\device.json'
+$AddComputer=$false
 $results=New-Object 'Collections.Generic.List[object]'
 function Assert-Equal($Actual,$Expected) {
     if (($Actual | ConvertTo-Json -Compress -Depth 8) -cne ($Expected | ConvertTo-Json -Compress -Depth 8)) { throw ('Expected '+($Expected|ConvertTo-Json -Compress)+'; got '+($Actual|ConvertTo-Json -Compress)) }
@@ -217,6 +218,251 @@ Case 'managed task and rollback use WScript GUI entry rather than a console exec
     Assert-Equal $source.Contains('Assert-HiddenLauncherAvailable') $true
     Assert-Equal $source.Contains('[Text.Encoding]::Unicode)') $true
     Assert-Equal $source.Contains('New-ScheduledTaskAction -Execute $windowsPowerShell') $false
+}
+
+
+Case 'AddComputer defaults off and does not change a minimal omp managed target' {
+    $ManifestUrl='https://relay.cyjin.dev/updates/device/stable.json'; $UpdateIntervalSeconds=300
+    $tree=Select-RelayLauncherTree (Normal-Tree)
+    $before=@(Migration-Arguments $tree)
+    $managed=@(Managed-Arguments $tree $before)
+    Assert-Equal (Relay-Options $managed).Values['packs'] 'minimal,omp'
+    Assert-Equal ((Relay-Options $managed).Values.ContainsKey('allow-computer')) $false
+    Assert-Equal @(Migration-Arguments $tree) $before
+}
+Case 'explicit AddComputer unions existing packs without changing rollback arguments' {
+    $AddComputer=$true
+    $ManifestUrl='https://relay.cyjin.dev/updates/device/stable.json'; $UpdateIntervalSeconds=300
+    $tree=Select-RelayLauncherTree (Normal-Tree)
+    $previous=@(Migration-Arguments $tree); $saved=@($previous)
+    $target=@(Managed-Arguments $tree $previous)
+    Assert-Equal (Relay-Options $target).Values['packs'] 'minimal,omp,computer'
+    Assert-Equal (Relay-Options $target).Values['allow-computer'] $true
+    Assert-Equal $previous $saved
+    Assert-Equal @(Migration-Arguments $tree) $saved
+    Assert-Equal $tree.Values['packs'] 'minimal,omp'
+}
+Case 'computer union is idempotent and preserves kernel permissions and option-like names' {
+    $original=@('connect','--packs=kernel,computer,minimal,omp','--allow-kernel','--allow-computer','--no-shell','--verbose','--name=--x','--update-interval','750')
+    Assert-Equal @(Add-ComputerArguments $original) $original
+    $withValue=@('connect','--name','--packs','--packs','minimal,kernel','--allow-kernel')
+    $target=@(Add-ComputerArguments $withValue)
+    Assert-Equal (Relay-Options $target).Values['name'] '--packs'
+    Assert-Equal (Relay-Options $target).Values['packs'] 'minimal,kernel,computer'
+    Assert-Equal (Relay-Options $target).Values['allow-kernel'] $true
+    Assert-Equal @(Add-ComputerArguments $target) $target
+}
+Case 'unknown options are refused before a computer target can be installed' {
+    $unknown=@('connect','--packs','minimal,omp','--future-permission')
+    $original=@($unknown)
+    Assert-Throws { Add-ComputerArguments $unknown } 'Unknown'
+    Assert-Equal $unknown $original
+}
+function Activation-Fixture([bool]$Explicit=$false) {
+    $values=Runtime-Values
+    if ($Explicit) { $values['packs']='minimal,omp,computer'; $values['allow-computer']=$true }
+    $processes=@((Process-Record 1 0 $values.Clone() $false $true),(Process-Record 2 1 $values.Clone()),(Process-Record 3 2 $values.Clone()))
+    foreach ($process in $processes) {
+        $process | Add-Member -NotePropertyName EntrySha256 -NotePropertyValue ('a'*64)
+        $process | Add-Member -NotePropertyName CreatedAt -NotePropertyValue '2026-11-25T01:00:00.000Z'
+    }
+    return @{
+        Processes=$processes
+        Settings=[pscustomobject]@{schema=1;enabled=$true;paused=$true;revision='enabled-revision';updatedAt='2026-11-25T00:59:00.000Z'}
+        Status=[pscustomobject]@{phase='running';sha256=('a'*64);version='0.1.12';supervisorVersion='0.1.12';updatedAt=1795568401000;reload=[pscustomobject]@{status='completed';requestKey='enabled-revision'}}
+        Commands=(New-Object 'Collections.Generic.List[string]')
+    }
+}
+Case 'completed same-revision reload proves implicit computer with a ready same-bundle worker' {
+    $ExpectedSha256='a'*64; $version='0.1.12'; $fixture=Activation-Fixture
+    function Owned-RelayProcesses { return $fixture.Processes }
+    function Read-Status { return $fixture.Status }
+    function Invoke-ComputerControl { param($Command,$DefaultEnabled) $fixture.Commands.Add($Command); return $fixture.Settings }
+    $result=Read-ComputerActivation @('minimal','omp','computer')
+    Assert-Equal $result.complete $true
+    Assert-Equal $result.reloadRevisionVerified $true
+    Assert-Equal $result.paused $true
+    Assert-Equal $result.registrationVerified $false
+    Assert-Equal $result.workerPid 3
+    Assert-Equal $result.effectivePacks @('minimal','omp','computer')
+}
+Case 'stale reload or status cannot claim a newly enabled implicit pack' {
+    $ExpectedSha256='a'*64; $version='0.1.12'; $fixture=Activation-Fixture
+    $fixture.Settings.updatedAt='2026-11-25T01:01:00.000Z'
+    $fixture.Status.reload.requestKey='old-revision'
+    function Owned-RelayProcesses { return $fixture.Processes }
+    function Read-Status { return $fixture.Status }
+    function Invoke-ComputerControl { param($Command,$DefaultEnabled) return $fixture.Settings }
+    $result=Read-ComputerActivation @('minimal','omp','computer')
+    Assert-Equal $result.enabled $true
+    Assert-Equal $result.complete $false
+    Assert-Equal $result.workerPackVerified $false
+    $fixture.Status.reload.requestKey='enabled-revision'
+    $fixture.Status.updatedAt=0
+    Assert-Equal (Read-ComputerActivation @('minimal','omp','computer')).complete $false
+    $fixture.Status.updatedAt=1795568401000
+    $fixture.Processes[2].EntrySha256='b'*64
+    Assert-Equal (Read-ComputerActivation @('minimal','omp','computer')).complete $false
+}
+Case 'fresh worker loads enabled sidecar without reload only after its saved timestamp' {
+    $ExpectedSha256='a'*64; $version='0.1.12'; $fixture=Activation-Fixture
+    $fixture.Status.reload=$null
+    function Owned-RelayProcesses { return $fixture.Processes }
+    function Read-Status { return $fixture.Status }
+    function Invoke-ComputerControl { param($Command,$DefaultEnabled) return $fixture.Settings }
+    $result=Read-ComputerActivation @('minimal','omp','computer')
+    Assert-Equal $result.complete $true
+    Assert-Equal $result.settingsLoaded $true
+    Assert-Equal $result.reloadRevisionVerified $false
+    $fixture.Settings.updatedAt='2026-11-25T01:01:00.000Z'
+    $result=Read-ComputerActivation @('minimal','omp','computer')
+    Assert-Equal $result.complete $false
+    Assert-Equal $result.settingsLoaded $false
+}
+Case 'unavailable live tree cannot infer disabled settings or trigger computer-enable' {
+    $ExpectedSha256='a'*64; $version='0.1.12'; $HealthTimeoutSeconds=0
+    $commands=New-Object 'Collections.Generic.List[string]'
+    function Owned-RelayProcesses { throw 'CIM fixture unavailable' }
+    function Invoke-ComputerControl { param($Command,$DefaultEnabled) $commands.Add($Command); throw 'Must not infer settings without live argv' }
+    $result=Ensure-ComputerActivation @('minimal','omp','computer')
+    Assert-Equal $result.complete $false
+    Assert-Equal $result.settingsVerified $false
+    Assert-Equal $result.enabled $null
+    Assert-Equal $result.paused $null
+    Assert-Equal $result.enableInvoked $false
+    Assert-Equal $commands.Count 0
+}
+Case 'explicitly registered computer remains complete after a local pause revision change' {
+    $ExpectedSha256='a'*64; $version='0.1.12'; $fixture=Activation-Fixture $true
+    $fixture.Settings.revision='pause-revision'
+    $fixture.Settings.updatedAt='2026-11-25T01:01:00.000Z'
+    function Owned-RelayProcesses { return $fixture.Processes }
+    function Read-Status { return $fixture.Status }
+    function Invoke-ComputerControl { param($Command,$DefaultEnabled) return $fixture.Settings }
+    $result=Read-ComputerActivation @('minimal','omp','computer')
+    Assert-Equal $result.complete $true
+    Assert-Equal $result.paused $true
+    Assert-Equal $result.reloadRevisionVerified $false
+}
+Case 'enable is invoked once for a disabled sidecar and never resumes local pause' {
+    $HealthTimeoutSeconds=0
+    $fixture=@{Enabled=$false;Commands=(New-Object 'Collections.Generic.List[string]')}
+    function Read-ComputerActivation {
+        return [ordered]@{enabled=$fixture.Enabled;paused=$true;settingsVerified=$true;runtimeReady=$true;complete=$fixture.Enabled;workerPackVerified=$fixture.Enabled}
+    }
+    function Invoke-ComputerControl {
+        param($Command)
+        $fixture.Commands.Add($Command); $fixture.Enabled=$true
+        return [pscustomobject]@{schema=1;enabled=$true;paused=$true}
+    }
+    $first=Ensure-ComputerActivation @('minimal','omp','computer')
+    Assert-Equal $first.complete $true
+    Assert-Equal $first.enableInvoked $true
+    Assert-Equal $first.paused $true
+    $retry=Ensure-ComputerActivation @('minimal','omp','computer')
+    Assert-Equal $retry.complete $true
+    Assert-Equal $retry.enableInvoked $false
+    Assert-Equal $fixture.Commands.ToArray() @('computer-enable')
+}
+Case 'busy safe-drain activation remains pending and retry does not replay enable' {
+    $HealthTimeoutSeconds=0
+    $fixture=@{Enabled=$false;Commands=(New-Object 'Collections.Generic.List[string]')}
+    function Read-ComputerActivation { return [ordered]@{enabled=$fixture.Enabled;paused=$true;settingsVerified=$true;runtimeReady=$true;complete=$false;workerPackVerified=$false} }
+    function Invoke-ComputerControl {
+        param($Command)
+        $fixture.Commands.Add($Command); $fixture.Enabled=$true
+        return [pscustomobject]@{schema=1;enabled=$true;paused=$true}
+    }
+    $result=Ensure-ComputerActivation @('minimal','omp','computer')
+    Assert-Equal $result.complete $false
+    Assert-Equal $result.enableInvoked $true
+    Assert-Equal $result.paused $true
+    $retry=Ensure-ComputerActivation @('minimal','omp','computer')
+    Assert-Equal $retry.complete $false
+    Assert-Equal $retry.enableInvoked $false
+    Assert-Equal $fixture.Commands.ToArray() @('computer-enable')
+    Assert-Equal ($retry.reason -match 'safely drained') $true
+}
+Case 'already-managed opt-in applies startup target before activation and retains installation on pending' {
+    $tree=Select-RelayLauncherTree (Normal-Tree); $task=[pscustomobject]@{Name='fixture'}
+    $report=[ordered]@{}; $calls=New-Object 'Collections.Generic.List[string]'
+    function Update-ComputerTaskAction { param($Task,$Tree) $calls.Add('task'); return $true }
+    function Ensure-ComputerActivation {
+        param([string[]]$RequiredPacks)
+        Assert-Equal $RequiredPacks @('minimal','omp','computer')
+        $calls.Add('activate')
+        return [ordered]@{enabled=$true;paused=$true;complete=$false;reason='safe drain pending'}
+    }
+    Assert-Throws { Complete-ComputerOptIn $tree $task } 'safe drain pending'
+    Assert-Equal $calls.ToArray() @('task','activate')
+    Assert-Equal $report.installationCommitted $true
+    Assert-Equal $report.computer.complete $false
+    Assert-Equal $report.computer.paused $true
+}
+function Task-Fixture {
+    return [pscustomobject]@{
+        Task=[pscustomobject]@{Actions=@([pscustomobject]@{Execute=$NodePath;Arguments='"previous.cjs" connect --packs minimal,omp';WorkingDirectory=$RelayRoot})}
+        SetCount=0; CorruptFirstWrite=$false
+    }
+}
+Case 'managed task computer target is hidden, backed up, verified and idempotent without restart' {
+    $AddComputer=$true; $ManifestUrl='https://relay.cyjin.dev/updates/device/stable.json'; $UpdateIntervalSeconds=300
+    $InstallRoot=Join-Path ([IO.Path]::GetTempPath()) ('relay-task-test-'+[Guid]::NewGuid().ToString('N'))
+    $NodePath=Join-Path $InstallRoot 'node.exe'; $bootstrapEntry=Join-Path $InstallRoot 'bootstrap.cjs'
+    $windowsScriptHost=Join-Path $InstallRoot 'wscript.exe'; $windowsPowerShell=Join-Path $InstallRoot 'powershell.exe'; $TaskName='fixture'
+    $report=[ordered]@{}; $fixture=Task-Fixture; $original=$fixture.Task; $tree=Select-RelayLauncherTree (Normal-Tree)
+    function Existing-Task { return $fixture.Task }
+    function Export-ScheduledTask { param($TaskPath,$TaskName) return '<Task>original-argv</Task>' }
+    function New-ScheduledTaskAction { param($Execute,$Argument,$WorkingDirectory) return [pscustomobject]@{Execute=$Execute;Arguments=$Argument;WorkingDirectory=$WorkingDirectory} }
+    function Set-ScheduledTask { param($TaskPath,$TaskName,$Action) $fixture.SetCount++; $fixture.Task=[pscustomobject]@{Actions=@($Action)} }
+    function Stop-Process { throw 'A managed opt-in must not stop a process' }
+    function Stop-ScheduledTask { throw 'A managed opt-in must not stop its task' }
+    function Start-ScheduledTask { throw 'A managed opt-in must not restart its task' }
+    try {
+        Assert-Equal (Update-ComputerTaskAction $original $tree) $true
+        Assert-Equal $fixture.SetCount 1
+        Assert-Equal ([IO.File]::ReadAllText($report.taskActionBackup)) '<Task>original-argv</Task>'
+        Assert-Equal (Hash $report.taskActionBackup) $report.taskActionBackupSha256
+        $hidden=@(Split-WindowsCommandLine $fixture.Task.Actions[0].Arguments)[2]
+        $content=[IO.File]::ReadAllText($hidden)
+        Assert-Equal $content.Contains(', 0, True)') $true
+        $encoded=[regex]::Match($content,'-EncodedCommand"" ""([^"]+)""').Groups[1].Value
+        $script=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded))
+        Assert-Equal $script.Contains("'minimal,omp,computer'") $true
+        Assert-Equal $script.Contains("'--allow-computer'") $true
+        Assert-Equal (Update-ComputerTaskAction $fixture.Task $tree) $false
+        Assert-Equal $fixture.SetCount 1
+        # The observed WScript file still matches, but its live task action was
+        # changed independently. A stale idempotency check must not claim success.
+        $observed=$fixture.Task
+        $fixture.Task=[pscustomobject]@{Actions=@([pscustomobject]@{Execute=$NodePath;Arguments='concurrent-edit';WorkingDirectory=$RelayRoot})}
+        Assert-Throws { Update-ComputerTaskAction $observed $tree } 'changed before computer opt-in'
+        Assert-Equal $fixture.SetCount 1
+    } finally { if (Test-Path -LiteralPath $InstallRoot) { Remove-Item -LiteralPath $InstallRoot -Recurse -Force } }
+}
+Case 'failed computer task readback restores the exact previous action' {
+    $AddComputer=$true; $ManifestUrl='https://relay.cyjin.dev/updates/device/stable.json'; $UpdateIntervalSeconds=300
+    $InstallRoot=Join-Path ([IO.Path]::GetTempPath()) ('relay-task-test-'+[Guid]::NewGuid().ToString('N'))
+    $NodePath=Join-Path $InstallRoot 'node.exe'; $bootstrapEntry=Join-Path $InstallRoot 'bootstrap.cjs'
+    $windowsScriptHost=Join-Path $InstallRoot 'wscript.exe'; $windowsPowerShell=Join-Path $InstallRoot 'powershell.exe'; $TaskName='fixture'
+    $report=[ordered]@{}; $fixture=Task-Fixture; $original=$fixture.Task; $tree=Select-RelayLauncherTree (Normal-Tree)
+    function Existing-Task { return $fixture.Task }
+    function Export-ScheduledTask { param($TaskPath,$TaskName) return '<Task>exact-original</Task>' }
+    function New-ScheduledTaskAction { param($Execute,$Argument,$WorkingDirectory) return [pscustomobject]@{Execute=$Execute;Arguments=$Argument;WorkingDirectory=$WorkingDirectory} }
+    function Set-ScheduledTask {
+        param($TaskPath,$TaskName,$Action)
+        $fixture.SetCount++; $fixture.Task=[pscustomobject]@{Actions=@($Action)}
+        if ($fixture.SetCount -eq 1) {
+            $hidden=@(Split-WindowsCommandLine $Action.Arguments)[2]
+            [IO.File]::WriteAllText($hidden,'readback mismatch')
+        }
+    }
+    try {
+        Assert-Throws { Update-ComputerTaskAction $original $tree } 'did not read back exactly'
+        Assert-Equal $fixture.SetCount 2
+        Assert-Equal (Same-TaskAction $fixture.Task $original) $true
+        Assert-Equal ([IO.File]::ReadAllText($report.taskActionBackup)) '<Task>exact-original</Task>'
+    } finally { if (Test-Path -LiteralPath $InstallRoot) { Remove-Item -LiteralPath $InstallRoot -Recurse -Force } }
 }
 
 $passed=@($results|Where-Object {-not $_.passed}).Count -eq 0

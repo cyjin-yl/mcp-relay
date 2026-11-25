@@ -42,6 +42,7 @@ def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--mode", choices=("Stage", "Install"), default="Stage")
+    parser.add_argument("--add-computer", action="store_true", help="Preserve existing packs and explicitly enable computer after managed activation")
     parser.add_argument("--ssh-target", required=True, help="Existing trusted user@hostname or user@address")
     parser.add_argument("--expected-computer-name", required=True)
     parser.add_argument("--expected-identity", required=True, help=r"Verified COMPUTER\user")
@@ -57,6 +58,16 @@ def arguments():
     parser.add_argument("--manifest-url")
     parser.add_argument("--node-path", help="Optional verified stable Windows node.exe; no fnm_multishells path")
     return parser.parse_args()
+
+
+def verify_computer_activation(receipt):
+    computer = receipt.get("computer", {})
+    if not (computer.get("requested") is True and computer.get("complete") is True
+            and computer.get("enabled") is True and isinstance(computer.get("paused"), bool)
+            and computer.get("workerPackVerified") is True and computer.get("runtimeReady") is True
+            and "computer" in computer.get("effectivePacks", [])):
+        raise AttemptError("Install receipt did not prove the explicitly requested computer pack")
+    return computer
 
 
 class Attempt:
@@ -141,8 +152,14 @@ class Attempt:
         self.save(name + ".json", value)
         self.steps.append({"name": name, "returnCode": result.returncode})
         if result.returncode != 0 or value.get("passed") is False:
+            if value.get("phase") == "capability-pending" and value.get("installationCommitted") is True:
+                self.report["phase"] = "capability-pending"
+                self.report["installationCommitted"] = True
+                if isinstance(value.get("computer"), dict):
+                    self.report["computer"] = value["computer"]
             reason = str(value.get("error", "Remote validation or deployment failed"))
-            retry = ("Another installer already owns" in reason
+            retry = (value.get("phase") == "capability-pending"
+                     or "Another installer already owns" in reason
                      or "Existing managed relay retains ownership" in reason)
             raise AttemptError(reason, 77 if value.get("permissionDenied") else 75 if retry else 1)
         return value
@@ -182,6 +199,7 @@ class Attempt:
             "  ExpectedRelayUrl = " + ps_quote(args.relay_url),
             "  ManifestUrl = " + ps_quote(args.manifest_url),
             "  RequireOtaProof = $true",
+            "  AddComputer = " + ("$true" if args.add_computer else "$false"),
             "}",
         ]) + "\n"
 
@@ -269,6 +287,8 @@ class Attempt:
                     or install_result.get("otaProven") is not True
                     or install_result.get("configSha256") != stage_result.get("configSha256")):
                 raise AttemptError("Install receipt did not prove the exact runtime, OTA transition and unchanged config")
+            if args.add_computer:
+                self.report["computer"] = verify_computer_activation(install_result)
             self.report["phase"] = install_result["phase"]
             self.report["runtimeVersion"] = install_result.get("runtimeVersion")
             self.report["supervisorVersion"] = install_result.get("supervisorVersion")
@@ -299,7 +319,7 @@ class Attempt:
 def main():
     args = arguments()
     if not args.execute:
-        print(json.dumps({"execute": False, "mode": args.mode,
+        print(json.dumps({"execute": False, "mode": args.mode, "addComputer": args.add_computer,
                           "sequence": ["verify local digests", "strict SSH identity", "transfer and verify",
                                        "Stage", "native loopback smoke"] + (
                                        ["Install -RequireOtaProof", "read receipts"] if args.mode == "Install" else []),
