@@ -132,12 +132,13 @@ async function main(): Promise<number> {
     }
     if (!settings.enabled || settings.paused) throw new Error("Enable and resume computer control before setup.");
     const backend = selectComputerBackend();
+    if (backend.setupInWorker) throw new Error("Wayland permissions belong to the running relay worker. Call its computer_setup tool with timeout_ms:120000, then approve the system desktop dialog. The one-shot CLI cannot transfer that permission session to another process.");
     const release = await acquireUpdateLock(join((await import("node:os")).homedir(), ".mcp-relay", "computer-control"), "desktop");
     try {
       const context = { signal: AbortSignal.timeout(120000), timeoutMs: 120000 };
       const result = backend.setup ? await backend.setup(context) : { state: await backend.inspect(context) };
       process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-    } finally { await release(); }
+    } finally { await backend.close?.(); await release(); }
     return 0;
   }
   if (command === "update-status") {

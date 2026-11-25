@@ -66,8 +66,8 @@ const tools: ToolDescriptor[] = [
   descriptor("computer_info", "For foreground-safe control, open computer_session with mode isolated and pass its lease_id to info, screenshot and action. Inspect desktop and local PVE VM console availability, input capabilities, permissions, and pause state. On a PVE host, choose display_id pve:<VMID> to inspect that VM's actual console; omit it to discover targets. Does not start VMs, grant permissions, or install software.", inspectSchema, true),
   descriptor("computer_screenshot", "With lease_id, capture only that isolated workspace; a closed/unavailable lease never falls back to the physical display. Choose foreground observation by omitting lease_id to observe the host screen or a selected PVE VM console as a native PNG image. Use display_id from computer_info (pve:<VMID> for a VM). Returns frame_id and dimensions; all action coordinates are pixels of this exact image. Capture a fresh frame after changes.", screenshotSchema, true),
   descriptor("computer_action", "Choose foreground input by omitting lease_id and capturing a foreground frame. Choose isolated input by passing the same lease_id used to capture its frame_id. A mismatched frame or lease is rejected. Perform one bounded mouse/touch/keyboard/text action on a fresh frame. Requires write scope. Use a unique request_id; retrying the same ID never replays input in this worker. Unknown outcomes require a new screenshot before continuing. Text inserts text without pressing Enter.", inputSchema, false),
-  descriptor("computer_handoff", "Pause or resume this device's computer control. Pause persists across updates; screenshots remain available. Resume requires fresh screenshots.", handoffSchema, false),
-  descriptor("computer_setup", "Explicitly set up the platform input bridge. Set workspace:true for the isolated workspace runtime; this never changes the physical clipboard or IME. Legacy Android setup installs its bundled Unicode IME. OS permission or su prompts require local approval; lock screens and permission dialogs remain enforced.", infoSchema, false)
+  descriptor("computer_handoff", "Pause or resume this device's computer control. Pause persists across updates. Wayland closes its portal permission session on pause; resume and run computer_setup before taking a new frame. Other foreground screenshots remain available while paused. Resume requires fresh screenshots.", handoffSchema, false),
+  descriptor("computer_setup", "Explicitly set up the platform input bridge. On Wayland, request a desktop-approved monitor and keyboard/pointer session in this connected worker; use timeout_ms:120000 to allow local consent. Inspect and screenshots never prompt. Set workspace:true for the isolated workspace runtime; this never changes the physical clipboard or IME. Legacy Android setup installs its bundled Unicode IME. OS permission or su prompts require local approval; lock screens and permission dialogs remain enforced.", infoSchema, false)
 ];
 type Frame = { display: ComputerDisplay; capturedAt: number; appId?: string; leaseId?: string; connectionEpoch?: string; ownerKey?: string };
 type Cached = { fingerprint: string; result: CallToolResult };
@@ -141,6 +141,34 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
   const generation = randomUUID();
   let busy = false;
   let activeAbort: AbortController | undefined;
+  let permissionSettings: { revision?: string } | undefined;
+  let permissionMonitor: ReturnType<typeof setInterval> | undefined;
+
+  async function closePermissionSession(): Promise<void> {
+    permissionSettings = undefined;
+    if (permissionMonitor) clearInterval(permissionMonitor);
+    permissionMonitor = undefined;
+    frames.clear();
+    await backend.close?.();
+  }
+  async function checkPermissionSettings(): Promise<void> {
+    if (!permissionSettings) return;
+    try {
+      const current = settings();
+      if (current.enabled && !current.paused && current.revision === permissionSettings.revision) return;
+    } catch { /* unreadable settings revoke the permission session */ }
+    await closePermissionSession();
+  }
+  function watchPermissionSettings(): { revision?: string } {
+    if (permissionMonitor) clearInterval(permissionMonitor);
+    const stamp = { revision: settings().revision };
+    permissionSettings = stamp;
+    // Local computer-pause/disable must also close an idle permission session.
+    // A revision change catches a pause/resume pair between two observations.
+    permissionMonitor = setInterval(() => { void checkPermissionSettings().catch(() => {}); }, 100);
+    permissionMonitor.unref();
+    return stamp;
+  }
 
   const remember = (id: string, fingerprint: string, result: CallToolResult) => {
     receipts.set(id, { fingerprint, result });
@@ -148,8 +176,11 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
   };
   const enabled = () => {
     const current = settings();
-    if (!current.enabled) throw new ComputerError("computer_disabled",
-      "Computer control is disabled. Enable it locally with mcp-relay computer-enable --config <path>.");
+    if (!current.enabled) {
+      void closePermissionSession().catch(() => {});
+      throw new ComputerError("computer_disabled",
+        "Computer control is disabled. Enable it locally with mcp-relay computer-enable --config <path>.");
+    }
     return current;
   };
   async function capture(displayId: string | undefined, ctx: NativeContext, workspaceId?: string, packCtx?: PackContext): Promise<CallToolResult> {
@@ -187,9 +218,11 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
     id: "computer",
     tools,
     updateBlockedReason: () => workspaces.updateBlockedReason(),
-    connectionClosed: () => { frames.clear(); },
-    revokeWorkspaceOwner: async ownerKey => { frames.clear(); await workspaces.revokeOwner(ownerKey); },
-    dispose: () => workspaces.dispose(),
+    connectionClosed: () => { void closePermissionSession().catch(() => {}); },
+    revokeWorkspaceOwner: async ownerKey => {
+      await Promise.all([closePermissionSession(), workspaces.revokeOwner(ownerKey)]);
+    },
+    dispose: async () => { await Promise.all([closePermissionSession(), workspaces.dispose()]); },
     async call(name: string, args: JsonObject, packCtx: PackContext): Promise<CallToolResult> {
       let release: (() => Promise<void>) | undefined;
       let deadline: ReturnType<typeof setTimeout> | undefined;
@@ -214,10 +247,13 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
         const signal = packCtx.signal ? AbortSignal.any([packCtx.signal, controller.signal]) : controller.signal;
         const context = (): NativeContext => ({ signal, timeoutMs: Math.max(1, Math.min(120000, timeoutMs - (now() - startedAt))) });
         signal.throwIfAborted();
+        await checkPermissionSettings();
+        signal.throwIfAborted();
 
-        if (name === "computer_info" && !settings().enabled) return jsonResult({
-          enabled: false, paused: settings().paused, backend: backend.id, generation
-        });
+        if (name === "computer_info" && !settings().enabled) {
+          await closePermissionSession();
+          return jsonResult({ enabled: false, paused: settings().paused, backend: backend.id, generation });
+        }
         enabled();
         if (name === "computer_session") {
           const input = sessionSchema.parse(parsed);
@@ -231,7 +267,7 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
           frames.clear();
           if (input.mode === "pause") {
             activeAbort?.abort(new ComputerError("handoff", "Computer control was paused."));
-            await workspaces.closeAll("disabled");
+            await Promise.all([closePermissionSession(), workspaces.closeAll("disabled")]);
           }
           return jsonResult({ ok: true, enabled: true, paused: input.mode === "pause", requires_new_frame: true });
         }
@@ -263,7 +299,7 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
         monitor = setInterval(() => {
           try {
             const current = settings();
-            if (!current.enabled || (name === "computer_action" && current.paused)) {
+            if (!current.enabled || ((name === "computer_action" || name === "computer_setup") && current.paused)) {
               controller.abort(new ComputerError("handoff", "Computer control was disabled or paused."));
             }
           } catch { controller.abort(new ComputerError("computer_disabled", "Computer settings could not be read.")); }
@@ -284,9 +320,20 @@ export function createComputerPack(options: ComputerPackOptions): ToolPack {
           if (settings().paused) throw new ComputerError("computer_paused", "Resume computer control before setup.");
           frames.clear();
           if (infoSchema.parse(parsed).workspace) return jsonResult({ ok: true, ...await workspaces.setup(context()) });
-          return jsonResult({ ok: true, ...(backend.setup ? await backend.setup(context()) : {
-            state: await backend.inspect(context()), automaticInstall: false
-          }) });
+          const stamp = backend.setupInWorker ? watchPermissionSettings() : undefined;
+          try {
+            const result = backend.setup ? await backend.setup(context()) : {
+              state: await backend.inspect(context()), automaticInstall: false
+            };
+            await checkPermissionSettings();
+            signal.throwIfAborted();
+            if (stamp && permissionSettings !== stamp) throw new ComputerError("computer_paused",
+              "Computer settings changed during setup. Resume control and request a new permission session.");
+            return jsonResult({ ok: true, ...result });
+          } catch (error) {
+            if (stamp) await closePermissionSession();
+            throw error;
+          }
         }
         const input = inputSchema.parse(parsed);
         const frame = frames.get(input.frame_id);

@@ -2,6 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { ComputerError, nativePoint, type ComputerAction, type ComputerBackend,
   type ComputerDisplay, type ComputerState, type NativeContext } from "./types.js";
 import { findExecutable, pngDimensions, runNative } from "./native.js";
+import { createWaylandBackend } from "./wayland.js";
 
 const keyNames: Record<string, string> = {
   ctrl: "Control_L", control: "Control_L", alt: "Alt_L", option: "Alt_L",
@@ -21,6 +22,7 @@ function xKey(key: string): string {
 }
 
 export function createLinuxBackend(env: NodeJS.ProcessEnv = process.env, run: typeof runNative = runNative): ComputerBackend {
+  if (env.XDG_SESSION_TYPE === "wayland" || env.WAYLAND_DISPLAY) return createWaylandBackend(env);
   const xdotool = findExecutable(["xdotool"], env);
   const importer = findExecutable(["import"], env);
   const magick = findExecutable(["magick"], env);
@@ -38,10 +40,6 @@ export function createLinuxBackend(env: NodeJS.ProcessEnv = process.env, run: ty
       platform: "linux", backend: "linux-x11", available: false, displayKind: "none",
       inputKind: "none", displays: [], actions: [], unicodeText: false,
       permissions: { screenCapture: "unknown", input: "unknown", unlocked: "unknown" }
-    };
-    if (env.XDG_SESSION_TYPE === "wayland" || env.WAYLAND_DISPLAY) return {
-      ...base, backend: "linux-wayland", reason: "Wayland requires a compositor-approved RemoteDesktop portal session. This release supports native X11; XWayland is not full-desktop control.",
-      details: { setupRequired: "portal-backend", xwaylandIgnored: Boolean(env.DISPLAY) }
     };
     if (!env.DISPLAY) return { ...base, reason: "No interactive X11 display is attached to this relay process. Start relay in the desktop user session." };
     if (!xdotool) return { ...base, reason: "Linux X11 input requires xdotool.", details: { missing: ["xdotool"] } };
