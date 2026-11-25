@@ -370,11 +370,11 @@ function Update-ComputerTaskAction($Task,$Tree) {
     $startCode=Node-Invocation $bootstrapEntry $targetArguments (Join-Path $InstallRoot 'relay.log')
     $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($startCode))
     $hiddenCode=Hidden-Launcher $windowsPowerShell @('-NoLogo','-NoProfile','-NonInteractive','-WindowStyle','Hidden','-EncodedCommand',$encoded) $RelayRoot
+    if (-not (Same-TaskAction (Existing-Task) $Task)) { throw 'Managed task action changed before computer opt-in; no action was replaced' }
     if ((Canonical ([string]$oldActions[0].Execute)) -eq (Canonical $windowsScriptHost)) {
         $oldArguments=@(Split-WindowsCommandLine ([string]$oldActions[0].Arguments))
         if ($oldArguments.Count -eq 3 -and $oldArguments[0] -ieq '//B' -and $oldArguments[1] -ieq '//NoLogo' -and (Canonical $oldArguments[2]).StartsWith((Canonical $InstallRoot)+[IO.Path]::DirectorySeparatorChar) -and (Test-Path -LiteralPath $oldArguments[2] -PathType Leaf) -and [IO.File]::ReadAllText($oldArguments[2]) -ceq $hiddenCode) { return $false }
     }
-    if (-not (Same-TaskAction (Existing-Task) $Task)) { throw 'Managed task action changed before computer opt-in; no action was replaced' }
     $backup=Join-Path $InstallRoot ('backups\computer-action-'+[DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')+'-'+[Guid]::NewGuid().ToString('N'))
     [IO.Directory]::CreateDirectory($backup) | Out-Null
     $xml=Join-Path $backup 'previous-task.xml'
@@ -411,7 +411,17 @@ function Invoke-ComputerControl([string]$Command,[bool]$DefaultEnabled=$false) {
 function Read-ComputerActivation([string[]]$RequiredPacks) {
     $tree=$null
     try { $tree=Select-RelayLauncherTree @(Owned-RelayProcesses) } catch { }
-    $defaultEnabled=($null -ne $tree -and [bool]$tree.Values['allow-computer'])
+    if ($null -eq $tree -or -not $tree.Root.Bootstrap -or $tree.Processes.Count -ne 3) {
+        # Without the live argv, a missing sidecar cannot be distinguished from
+        # an existing --allow-computer default. Do not infer a disabled setting.
+        return [ordered]@{
+            requested=$true; enabled=$null; paused=$null; settingsVerified=$false
+            effectivePacks=@(); workerPackVerified=$false; runtimeReady=$false; complete=$false
+            registrationVerified=$false; registrationVerification='requires fresh server MCP discovery'
+            reason='Live managed relay tree is not verified; computer settings were not changed'
+        }
+    }
+    $defaultEnabled=[bool]$tree.Values['allow-computer']
     $settings=Invoke-ComputerControl 'computer-status' $defaultEnabled
     $argvPacks=if ($null -ne $tree -and $tree.Values.ContainsKey('packs')) { @(([string]$tree.Values['packs']).Split(',')) } else { @() }
     $packs=@($argvPacks)
@@ -437,7 +447,7 @@ function Read-ComputerActivation([string[]]$RequiredPacks) {
     }
     $packVerified=($ready -and $settingsLoaded -and @($RequiredPacks | Where-Object { $_ -notin $packs }).Count -eq 0 -and $packs -contains 'computer')
     return [ordered]@{
-        requested=$true; enabled=$settings.enabled; paused=$settings.paused; effectivePacks=$packs
+        requested=$true; enabled=$settings.enabled; paused=$settings.paused; settingsVerified=$true; effectivePacks=$packs
         workerPackVerified=$packVerified; runtimeReady=$ready; complete=($settings.enabled -and $packVerified)
         reloadRevisionVerified=$reloadVerified; settingsLoaded=$settingsLoaded
         workerPid=$(if ($null -ne $worker) { $worker.Id } else { $null })
@@ -450,6 +460,11 @@ function Read-ComputerActivation([string[]]$RequiredPacks) {
 function Ensure-ComputerActivation([string[]]$RequiredPacks) {
     $activation=Read-ComputerActivation $RequiredPacks
     $activation.enableInvoked=$false
+    if (-not $activation.settingsVerified) { return $activation }
+    if (-not $activation.enabled -and -not $activation.runtimeReady) {
+        $activation.reason='Target worker readiness is pending; computer settings were not changed'
+        return $activation
+    }
     if (-not $activation.enabled) {
         # Explicit AddComputer grants opt-in. Never resume local pause or kill
         # a busy worker; computer-enable asks the supervisor for safe drain.
@@ -464,6 +479,7 @@ function Ensure-ComputerActivation([string[]]$RequiredPacks) {
         $invoked=$activation.enableInvoked
         $activation=Read-ComputerActivation $RequiredPacks
         $activation.enableInvoked=$invoked
+        if (-not $activation.settingsVerified) { return $activation }
         if ($activation.complete) { return $activation }
         if (-not $activation.enabled) { $activation.reason='Computer control was disabled during activation; it was not enabled again'; return $activation }
         if ($clock.ElapsedMilliseconds -ge $waitMilliseconds) { break }

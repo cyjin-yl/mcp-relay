@@ -304,6 +304,34 @@ Case 'stale reload or status cannot claim a newly enabled implicit pack' {
     $fixture.Processes[2].EntrySha256='b'*64
     Assert-Equal (Read-ComputerActivation @('minimal','omp','computer')).complete $false
 }
+Case 'fresh worker loads enabled sidecar without reload only after its saved timestamp' {
+    $ExpectedSha256='a'*64; $version='0.1.12'; $fixture=Activation-Fixture
+    $fixture.Status.reload=$null
+    function Owned-RelayProcesses { return $fixture.Processes }
+    function Read-Status { return $fixture.Status }
+    function Invoke-ComputerControl { param($Command,$DefaultEnabled) return $fixture.Settings }
+    $result=Read-ComputerActivation @('minimal','omp','computer')
+    Assert-Equal $result.complete $true
+    Assert-Equal $result.settingsLoaded $true
+    Assert-Equal $result.reloadRevisionVerified $false
+    $fixture.Settings.updatedAt='2026-11-25T01:01:00.000Z'
+    $result=Read-ComputerActivation @('minimal','omp','computer')
+    Assert-Equal $result.complete $false
+    Assert-Equal $result.settingsLoaded $false
+}
+Case 'unavailable live tree cannot infer disabled settings or trigger computer-enable' {
+    $ExpectedSha256='a'*64; $version='0.1.12'; $HealthTimeoutSeconds=0
+    $commands=New-Object 'Collections.Generic.List[string]'
+    function Owned-RelayProcesses { throw 'CIM fixture unavailable' }
+    function Invoke-ComputerControl { param($Command,$DefaultEnabled) $commands.Add($Command); throw 'Must not infer settings without live argv' }
+    $result=Ensure-ComputerActivation @('minimal','omp','computer')
+    Assert-Equal $result.complete $false
+    Assert-Equal $result.settingsVerified $false
+    Assert-Equal $result.enabled $null
+    Assert-Equal $result.paused $null
+    Assert-Equal $result.enableInvoked $false
+    Assert-Equal $commands.Count 0
+}
 Case 'explicitly registered computer remains complete after a local pause revision change' {
     $ExpectedSha256='a'*64; $version='0.1.12'; $fixture=Activation-Fixture $true
     $fixture.Settings.revision='pause-revision'
@@ -320,7 +348,7 @@ Case 'enable is invoked once for a disabled sidecar and never resumes local paus
     $HealthTimeoutSeconds=0
     $fixture=@{Enabled=$false;Commands=(New-Object 'Collections.Generic.List[string]')}
     function Read-ComputerActivation {
-        return [ordered]@{enabled=$fixture.Enabled;paused=$true;complete=$fixture.Enabled;workerPackVerified=$fixture.Enabled}
+        return [ordered]@{enabled=$fixture.Enabled;paused=$true;settingsVerified=$true;runtimeReady=$true;complete=$fixture.Enabled;workerPackVerified=$fixture.Enabled}
     }
     function Invoke-ComputerControl {
         param($Command)
@@ -339,7 +367,7 @@ Case 'enable is invoked once for a disabled sidecar and never resumes local paus
 Case 'busy safe-drain activation remains pending and retry does not replay enable' {
     $HealthTimeoutSeconds=0
     $fixture=@{Enabled=$false;Commands=(New-Object 'Collections.Generic.List[string]')}
-    function Read-ComputerActivation { return [ordered]@{enabled=$fixture.Enabled;paused=$true;complete=$false;workerPackVerified=$false} }
+    function Read-ComputerActivation { return [ordered]@{enabled=$fixture.Enabled;paused=$true;settingsVerified=$true;runtimeReady=$true;complete=$false;workerPackVerified=$false} }
     function Invoke-ComputerControl {
         param($Command)
         $fixture.Commands.Add($Command); $fixture.Enabled=$true
@@ -403,6 +431,12 @@ Case 'managed task computer target is hidden, backed up, verified and idempotent
         Assert-Equal $script.Contains("'minimal,omp,computer'") $true
         Assert-Equal $script.Contains("'--allow-computer'") $true
         Assert-Equal (Update-ComputerTaskAction $fixture.Task $tree) $false
+        Assert-Equal $fixture.SetCount 1
+        # The observed WScript file still matches, but its live task action was
+        # changed independently. A stale idempotency check must not claim success.
+        $observed=$fixture.Task
+        $fixture.Task=[pscustomobject]@{Actions=@([pscustomobject]@{Execute=$NodePath;Arguments='concurrent-edit';WorkingDirectory=$RelayRoot})}
+        Assert-Throws { Update-ComputerTaskAction $observed $tree } 'changed before computer opt-in'
         Assert-Equal $fixture.SetCount 1
     } finally { if (Test-Path -LiteralPath $InstallRoot) { Remove-Item -LiteralPath $InstallRoot -Recurse -Force } }
 }
