@@ -12,9 +12,10 @@
   },
   "main": "./dist/cli.cjs",
   "bin": {
-    "mcp-relay": "./dist/cli.cjs"
+    "mcp-relay": "./bin/mcp-relay.cjs"
   },
   "files": [
+    "bin/mcp-relay.cjs",
     "dist/cli.cjs",
     "README.md"
   ],
