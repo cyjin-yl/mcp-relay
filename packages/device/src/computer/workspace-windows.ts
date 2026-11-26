@@ -285,6 +285,10 @@ export function createWindowsWorkspaceProvider(overrides: Partial<WindowsWorkspa
         }
         if (!ready) throw new ComputerError("WORKSPACE_START_TIMEOUT", "The child session did not become ready before its authorized deadline.");
         d.childSession = ready.session as number; d.seatPid = object(ready.seat)!.pid as number;
+        // Anode logs rendering-setup failures without aborting. Check the prerequisite
+        // before hiding or acquiring input; actual hidden capture still needs verification.
+        if (ready.backgroundRenderingConfigured !== true)
+          throw new ComputerError("WORKSPACE_BACKGROUND_RENDERING_UNAVAILABLE", "The RDP background-rendering prerequisite is not configured; the workspace was not activated.");
         // The only visible sign-in UI belongs to this explicitly opted-in open.
         // Once authenticated, hide its viewer before any agent lease exists.
         if (d.interactiveSignIn) await dep.request(d.channel, { op: "seat.hide" }, context);

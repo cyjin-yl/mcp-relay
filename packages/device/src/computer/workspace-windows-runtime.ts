@@ -433,7 +433,9 @@ try {
  if($g.HasExited -or $g.SessionId -ne [int]$c.parentSession -or [string]$guardian.instanceId -cne [string]$c.instanceId -or $g.StartTime.ToUniversalTime().ToFileTimeUtc().ToString([Globalization.CultureInfo]::InvariantCulture) -cne [string]$guardian.started){throw 'The independent workspace guardian is not alive.'}
  if($null -ne (Get-ChildSession)){throw 'An existing child session will not be replaced.'}
  if($null -ne (Get-OwnedViewer $c $true)){throw 'An owned viewer already exists.'}
- $arguments=@('--channel',[string]$c.channel,'up','--keep','--no-background-rendering','--width',[string]$c.width,'--height',[string]$c.height,'--scale','100','--state-dir',[IO.Path]::GetDirectoryName($StatePath))
+ # Keep the pinned runtime's background-rendering setup. It backs up any changed
+ # per-user RDP preference in this private state directory before creating ActiveX.
+ $arguments=@('--channel',[string]$c.channel,'up','--keep','--width',[string]$c.width,'--height',[string]$c.height,'--scale','100','--state-dir',[IO.Path]::GetDirectoryName($StatePath))
  if($c.interactiveSignIn -eq $true){$arguments+= '--sign-in'}else{$arguments+= '--hidden'}
  $start=New-Object Diagnostics.ProcessStartInfo
  $start.FileName=[string]$c.runtimeExe

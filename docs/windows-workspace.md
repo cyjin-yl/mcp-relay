@@ -16,6 +16,14 @@ The ordinary signed-in interactive user must create the workspace. Session 0/SSH
 
 The user must have an available child-session slot. A retained child from a previous handoff is not silently adopted, replaced or logged off.
 
+### Background rendering
+
+The owned Anode daemon uses its upstream background-rendering configuration before creating the RDP viewer. It sets the current user's `HKCU\Software\Microsoft\Terminal Server Client\RemoteDesktop_SuppressWhenMinimized` DWORD to `2`. When it changes that preference, it saves the previous value in `rdp-rendering-backup.json` in the private Anode state directory; an existing DWORD `2` needs no change or new backup. This rendering preference also affects other RDP clients subsequently started by the same Windows user; it does not change authentication or firewall policy. Unexpected registry types are preserved by Anode. If the daemon does not report the setting as configured, Relay refuses to hide the authenticated viewer or acquire an input lease and reports `WORKSPACE_BACKGROUND_RENDERING_UNAVAILABLE`.
+
+The setting mitigates hidden-viewer rendering suppression; it does not prove that capture or input works. Every visual action still requires a fresh screenshot, and native acceptance still requires the controlled application to update while the viewer is hidden. See the pinned upstream [hidden-capture guidance](https://github.com/skulitom/Anode/blob/cbed84ff7465c0bd0310a3eec20c68046322fb53/docs/TROUBLESHOOTING.md#hidden-viewer-capture-fails).
+
+Recovery preserves the running daemon and its applications, so it does not undo the preference during handoff. After the user has finished that retained session and the owned daemon has stopped, the original value can be restored with Anode's `rendering --restore` command using the same `--state-dir`. Anode restores only while the current value is still DWORD `2`; otherwise it leaves the current value unchanged. This comparison cannot distinguish a later user write of the same value. Retain the matching backup until restoration is complete. See upstream [preference scope and undo](https://github.com/skulitom/Anode/blob/cbed84ff7465c0bd0310a3eec20c68046322fb53/docs/SECURITY.md#per-user-background-rendering).
+
 Primary references:
 
 - [Microsoft child sessions](https://learn.microsoft.com/en-us/windows/win32/termserv/child-sessions)
@@ -94,6 +102,14 @@ The one-login validation flow:
 The fixture is deliberately left in the handoff viewer. It has no user documents and is safe for the user to close. The observer never logs off the child or kills applications.
 
 The final receipt is child-session-native.json in the private validation directory. It includes a schema version, status, exact harness/runtime/fixture hashes, source image hash, session identities, the original deadlines, physical-session observations and explicit gate booleans. The native gate is passed only when all gates are true. The validation owner terminates itself intentionally, so its nonzero exit alone is not the final test result.
+
+### Locating a validation failure
+
+`native-ready` confirms that the child host is ready and the controlled application's launch request returned successfully. The application's window may still be starting. This event proves neither fixture readiness nor a completed capture/input check.
+
+The progress log identifies the fixture-ready, Unicode, click and pointer waits separately, and records a failed wait before recovery begins. Initial fixture readiness has a 30-second budget; the input-result waits retain their 8-second budgets. Every active wait is also bounded by the original lease and hard deadlines, checks heartbeat health, and rejects a result that arrives after its deadline. Waiting never extends the authorized session. The independent recovery observer only reads the retained fixture with its own bounded wait; it does not renew or regain the revoked input lease.
+
+An initial fixture timeout requires checking when its own state file appeared and whether its nonce, session and open-window state match the current run. A state file that appears only after the viewer is handed back does not prove that the application was usable while the viewer was hidden. Investigate background rendering as well as application startup before retrying; a longer startup budget alone does not establish that hidden capture and input work. Keep the handed-off session and its applications intact. The final native receipt and every acceptance gate are still required.
 
 ## Acceptance boundary
 

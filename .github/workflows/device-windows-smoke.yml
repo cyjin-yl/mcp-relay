@@ -101,7 +101,7 @@ jobs:
           ('MCP_RELAY_POWERSHELL=' + (Join-Path $PSHOME $powerShellName)) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Test updater state transitions, reloads and Windows environment
         run: |
-          npm.cmd exec --no -- vitest run packages/device/test/updater.test.ts packages/device/test/updater-reload.test.ts packages/device/test/windows-shell.test.ts packages/device/test/windows-workspace.test.ts
+          npm.cmd exec --no -- vitest run packages/device/test/updater.test.ts packages/device/test/updater-reload.test.ts packages/device/test/windows-shell.test.ts packages/device/test/windows-workspace.test.ts packages/device/test/windows-workspace-fixture-wait.test.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build standalone client and native acceptance harnesses from this commit
         run: |
@@ -117,6 +117,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/build-windows-updater-tests.mjs (Join-Path $artifactDir 'windows-updater-smoke.cjs')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/build-windows-workspace-tests.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item .tmp/windows-workspace-runtime/windows-workspace-smoke.cjs (Join-Path $artifactDir 'windows-workspace-smoke.cjs')
       - name: Compile the owned isolated-session validation fixture
         run: |
           $ErrorActionPreference = 'Stop'
@@ -201,6 +204,7 @@ jobs:
             ${{ runner.temp }}/relay-native-smoke/acceptance.json
             ${{ runner.temp }}/relay-native-smoke/windows-updater.tap
             ${{ runner.temp }}/relay-native-smoke/windows-workspace-fixture-build.json
+            ${{ runner.temp }}/relay-native-smoke/windows-workspace-smoke.cjs
             ${{ runner.temp }}/relay-native-smoke/ota-evidence/**/*.json*
             ${{ runner.temp }}/relay-native-smoke/ota-evidence/**/*.log
           if-no-files-found: warn

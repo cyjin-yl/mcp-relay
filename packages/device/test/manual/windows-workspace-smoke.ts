@@ -10,6 +10,7 @@ import { ANODE_EXECUTABLE_BYTES, ANODE_EXECUTABLE_SHA256, ANODE_RUNTIME_VERSION,
   WINDOWS_WORKSPACE_GUARDIAN, WINDOWS_WORKSPACE_OWNER, WINDOWS_HIDDEN_LAUNCHER, anodeRequest,
   sha256File, verifyAnodeRuntime, windowsPowerShell, windowsScriptHost, windowsWorkspaceNative, writePrivateJson } from "../../src/computer/workspace-windows-runtime.js";
 import type { WorkspaceOpenOptions, WorkspaceProviderContext, WorkspaceResource } from "../../src/computer/workspace-types.js";
+import { waitForFixture, type FixtureWaitProgress, type FixtureWaitState, type OwnerFixtureWaitStage } from "./windows-workspace-fixture-wait.js";
 
 declare const RELAY_WINDOWS_FIXTURE_SOURCE: string;
 declare const RELAY_WINDOWS_OBSERVER_SOURCE: string;
@@ -19,8 +20,8 @@ const runtime = { sourceCommit: ANODE_SOURCE_COMMIT, dotnetRuntime: ANODE_RUNTIM
 const expectedText = "你好，隔离桌面🙂";
 const provider = createWindowsWorkspaceProvider();
 interface Rectangle { x: number; y: number; width: number; height: number }
-interface Fixture {
-  nonce: string; pid: number; session: number; started: string; closed: boolean; text: string; clicks: number; warps: number;
+interface Fixture extends FixtureWaitState {
+  pid: number; started: string;
   textBox: Rectangle; clickButton: Rectangle; pointerButton: Rectangle;
 }
 type Evidence = Record<string, unknown> & { gates: Record<string, boolean> };
@@ -80,14 +81,18 @@ async function prepareLauncher() {
     launchNow: false, interactiveSignInOnlyByUser: true };
   await writePrivateJson(join(root, "launcher-receipt.json"), receipt); return receipt;
 }
-async function waitFixture(path: string, nonce: string, session: number, predicate: (f: Fixture) => boolean): Promise<Fixture> {
-  const until = Date.now() + 8000;
-  while (Date.now() < until) {
-    const f = await json<Fixture>(path);
-    if (f?.nonce === nonce && f.session === session && f.closed === false && predicate(f)) return f;
-    await delay(100);
+async function fixtureProgress(event: FixtureWaitProgress) {
+  await progress("fixture-wait-" + event.outcome, { ...event });
+}
+async function fixtureStage<T>(stage: OwnerFixtureWaitStage, action: () => Promise<T>): Promise<T> {
+  try {
+    await progress("fixture-stage-started", { fixtureStage: stage });
+    return await action();
+  } catch (error) {
+    await progress("fixture-stage-failed", { fixtureStage: stage,
+      code: error instanceof ComputerError ? error.code : "VALIDATION_FAILED" }).catch(() => {});
+    throw error;
   }
-  throw new Error("The owned child-session fixture did not reach the expected state.");
 }
 async function observeRecovery(packetPath: string) {
   if (!win32.isAbsolute(packetPath) || win32.relative(root, packetPath).startsWith("..")) throw new Error("Invalid validation observer packet.");
@@ -109,7 +114,9 @@ async function observeRecovery(packetPath: string) {
     const recoveredAt = Date.now();
     const native = await anodeRequest(String(d.channel), { op: "status", agentId: String(d.agentId) }, context);
     const lease = record(native.lease);
-    const fixture = await waitFixture(fixturePath, fixtureNonce, Number(d.childSession), () => true);
+    const fixture = await waitForFixture({ stage: "recovery-fixture", nonce: fixtureNonce,
+      session: Number(d.childSession), expectedText, read: () => json<Fixture>(fixturePath),
+      predicate: () => true, onProgress: fixtureProgress });
     const processIdentity = await windowsWorkspaceNative({ op: "inspect", brokerPid: fixture.pid }, context);
     let denied = false;
     try { await provider.act(resource, { type: "move", x: 0, y: 0 }, context); }
@@ -142,7 +149,11 @@ async function observeRecovery(packetPath: string) {
 async function validateNative(resource: WorkspaceResource, options: WorkspaceOpenOptions, context: WorkspaceProviderContext,
   fixturePath: string, fixtureNonce: string, fixtureReceipt: Awaited<ReturnType<typeof prepareFixture>>, assertHeartbeat: () => void) {
   const d = resource.data, child = Number(d.childSession);
-  const fixture = await waitFixture(fixturePath, fixtureNonce, child, () => true);
+  const wait = (stage: OwnerFixtureWaitStage, predicate: (fixture: Fixture) => boolean) => waitForFixture({
+    stage, nonce: fixtureNonce, session: child, expectedText, read: () => json<Fixture>(fixturePath), predicate,
+    expiresAt: options.expiresAt, hardExpiresAt: options.hardExpiresAt, assertHeartbeat, onProgress: fixtureProgress,
+  });
+  const fixture = await wait("fixture-ready", () => true);
   // The invisible owned viewer is placed under the existing pointer. The host
   // cursor is never moved to make this test pass.
   await observeHost({ op: "place-hidden-viewer", data: d }, context);
@@ -151,14 +162,20 @@ async function validateNative(resource: WorkspaceResource, options: WorkspaceOpe
   const start = await provider.inspect(resource, context), guardBefore = record(start.details?.pointerGuard);
   const act = async (action: ComputerAction) => { assertHeartbeat(); await provider.capture(resource, context); await provider.act(resource, action, context); assertHeartbeat(); };
   const middle = (r: Rectangle) => ({ x: r.x + Math.floor(r.width / 2), y: r.y + Math.floor(r.height / 2) });
-  await act({ type: "click", ...middle(fixture.textBox) });
-  await act({ type: "key", keys: ["ctrl", "a"] });
-  await act({ type: "text", text: expectedText });
-  await waitFixture(fixturePath, fixtureNonce, child, f => f.text === expectedText);
-  await act({ type: "click", ...middle(fixture.clickButton) });
-  await waitFixture(fixturePath, fixtureNonce, child, f => f.clicks === 1);
-  await act({ type: "click", ...middle(fixture.pointerButton) });
-  const observed = await waitFixture(fixturePath, fixtureNonce, child, f => f.warps >= 1);
+  await fixtureStage("unicode-input", async () => {
+    await act({ type: "click", ...middle(fixture.textBox) });
+    await act({ type: "key", keys: ["ctrl", "a"] });
+    await act({ type: "text", text: expectedText });
+    await wait("unicode-input", f => f.text === expectedText);
+  });
+  await fixtureStage("click-input", async () => {
+    await act({ type: "click", ...middle(fixture.clickButton) });
+    await wait("click-input", f => f.clicks === 1);
+  });
+  const observed = await fixtureStage("pointer-isolation", async () => {
+    await act({ type: "click", ...middle(fixture.pointerButton) });
+    return await wait("pointer-isolation", f => f.warps >= 1);
+  });
   await delay(250);
   const state = await provider.inspect(resource, context), guardAfter = record(state.details?.pointerGuard);
   const screenshot = await provider.capture(resource, context);
@@ -262,6 +279,9 @@ async function main() {
       console.log(JSON.stringify({ recovery: await provider.recover(resource, options, "explicit", context) }));
     }
   } catch (error) {
+    await progress("validation-failed-before-recovery", {
+      code: error instanceof ComputerError ? error.code : "VALIDATION_FAILED",
+    }).catch(() => {});
     if (resource?.leaseId === options.leaseId) {
       try {
         const recovery = await provider.recover(resource, options, "open_failed", context);

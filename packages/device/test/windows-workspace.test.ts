@@ -15,11 +15,12 @@ function resource(): WorkspaceResource {
 }
 function status(r = resource()) {
   return { state: "ready", channel: r.data.channel, parentSession: 1, session: 3, agentReady: true, viewerConnection: 1,
-    viewOnly: true, pointerGuard: { installed: true, patchedImports: 1, suppressed: 4, forwarded: 0 },
+    viewOnly: true, backgroundRenderingConfigured: true, pointerGuard: { installed: true, patchedImports: 1, suppressed: 4, forwarded: 0 },
     seat: { session: 3, pid: 123, screen: { width: 1280, height: 720 } }, lease: { ownerAgentId: r.data.agentId } };
 }
 function harness(changes: { now?: number; recovery?: Record<string, unknown>; reply?: Record<string, unknown>;
-  revoked?: boolean; missingStateDirectory?: boolean; recoveryResult?: Record<string, unknown>; nativeRecoverError?: boolean; guardianError?: boolean } = {}) {
+  statusPatch?: Record<string, unknown>; revoked?: boolean; missingStateDirectory?: boolean; recoveryResult?: Record<string, unknown>;
+  nativeRecoverError?: boolean; guardianError?: boolean } = {}) {
   const calls: Record<string, unknown>[] = [];
   let persisted: Record<string, unknown> = {}, revoked = changes.revoked ?? false, revocationWrites = 0;
   const native = vi.fn(async (q: Record<string, unknown>) => {
@@ -35,7 +36,7 @@ function harness(changes: { now?: number; recovery?: Record<string, unknown>; re
   });
   const request = vi.fn(async (channel: string, q: Record<string, unknown>) => {
     calls.push(q);
-    if (q.op === "status") return changes.reply ?? { ...status(), channel, lease: { ownerAgentId: null } };
+    if (q.op === "status") return changes.reply ?? { ...status(), channel, lease: { ownerAgentId: null }, ...changes.statusPatch };
     if (q.op === "lease") return { ownerAgentId: q.agentId, leaseToken: "native-token", expiresInMs: 10000 };
     return { performed: true };
   });
@@ -100,7 +101,9 @@ describe("Windows isolated workspace", () => {
     }
     expect(owner.arguments).not.toContain("-File");
     expect(h.native.mock.calls.map(c => c[0].op)).toEqual(["inspect", "protect", "launch", "guardian-check", "launch", "lease-acquire"]);
-    expect(WINDOWS_WORKSPACE_OWNER).toContain("'up','--keep','--no-background-rendering'");
+    expect(WINDOWS_WORKSPACE_OWNER).toContain("'up','--keep','--width'");
+    expect(WINDOWS_WORKSPACE_OWNER).not.toContain("--no-background-rendering");
+    expect(WINDOWS_WORKSPACE_OWNER).toContain("'--state-dir',[IO.Path]::GetDirectoryName($StatePath)");
     expect(WINDOWS_WORKSPACE_OWNER).toContain("if($c.interactiveSignIn -eq $true){$arguments+= '--sign-in'}else{$arguments+= '--hidden'}");
     for (const flag of ["--clipboard", "--audio", "--control"]) expect(WINDOWS_WORKSPACE_OWNER).not.toContain(flag);
     expect(h.calls.some(q => q.op === "lease")).toBe(false);
@@ -202,11 +205,46 @@ describe("Windows isolated workspace", () => {
     const opened = await h.provider.open({ ...options, interactiveSignIn: true }, h.ctx);
     expect(opened.data.interactiveSignIn).toBe(true);
     expect(h.calls).toEqual(expect.arrayContaining([{ op: "seat.hide" }]));
+    const hideIndex = h.request.mock.calls.findIndex(([, q]) => q.op === "seat.hide");
+    const acquireIndex = h.native.mock.calls.findIndex(([q]) => q.op === "lease-acquire");
+    expect(h.request.mock.invocationCallOrder[hideIndex]).toBeLessThan(h.native.mock.invocationCallOrder[acquireIndex]!);
     expect(h.writeJson.mock.calls.some(c => (c[1] as Record<string, unknown>).phase === "preparing")).toBe(true);
     const ordinary = harness();
     const invisible = await ordinary.provider.open(options, ordinary.ctx);
     expect(invisible.data.interactiveSignIn).toBe(false);
     expect(ordinary.calls.some(c => c.op === "seat.hide")).toBe(false);
+  });
+
+  it.each([
+    { label: "interactive sign-in", interactiveSignIn: true, configured: false },
+    { label: "unattended sign-in", interactiveSignIn: false, configured: false },
+    { label: "missing status field", interactiveSignIn: true, configured: undefined },
+    { label: "non-boolean status field", interactiveSignIn: true, configured: "true" },
+  ])("refuses activation without the rendering prerequisite: $label", async ({ interactiveSignIn, configured }) => {
+    const h = harness({ statusPatch: { backgroundRenderingConfigured: configured } });
+    await expect(h.provider.open({ ...options, interactiveSignIn,
+      launch: { executable: "C:\\private\\fixture.exe", args: [] } }, h.ctx)).rejects.toMatchObject({
+      code: "WORKSPACE_BACKGROUND_RENDERING_UNAVAILABLE",
+    });
+    expect(h.calls.map(q => q.op)).toEqual(["status"]);
+    expect(h.native.mock.calls.some(([q]) => q.op === "lease-acquire")).toBe(false);
+    expect(h.writeJson.mock.calls.every(([, value]) => (value as Record<string, unknown>).phase === "preparing")).toBe(true);
+  });
+
+  it("hands back a rendering-setup failure without granting or reactivating agent input", async () => {
+    const h = harness({ statusPatch: { backgroundRenderingConfigured: false } });
+    await expect(h.provider.open({ ...options, interactiveSignIn: true }, h.ctx)).rejects.toMatchObject({
+      code: "WORKSPACE_BACKGROUND_RENDERING_UNAVAILABLE",
+    });
+    const prepared = vi.mocked(h.ctx.checkpoint).mock.calls.at(-1)![0];
+    expect(prepared.data).toMatchObject({ childSession: 3, seatPid: 123, phase: "preparing",
+      expiresAt: options.expiresAt, hardExpiresAt: options.hardExpiresAt });
+    expect(await h.provider.recover(prepared, options, "open_failed", h.ctx)).toMatchObject({
+      complete: true, outcome: "handoff-viewer", inputRevoked: true, ownedDisplayRemoved: false,
+    });
+    await expect(h.provider.act(prepared, { type: "text", text: "late input" }, h.ctx)).rejects.toMatchObject({ code: "WORKSPACE_HANDED_OFF" });
+    expect(h.calls.map(q => q.op)).toEqual(["status"]);
+    expect(h.native.mock.calls.map(([q]) => q.op)).toEqual(["inspect", "protect", "launch", "guardian-check", "launch", "recover"]);
   });
 
   it("recovers an intent checkpointed before its private state directory existed", async () => {
